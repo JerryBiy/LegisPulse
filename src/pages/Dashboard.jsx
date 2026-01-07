@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback } from "react";
 import { Bill } from "@/entities/Bill";
 import { User } from "@/entities/User";
@@ -15,7 +14,7 @@ import { Link } from "react-router-dom";
 export default function Dashboard() {
   const [bills, setBills] = useState([]);
   const [filteredBills, setFilteredBills] = useState([]);
-  const [filters, setFilters] = useState({ session_year: 2024 });
+  const [filters, setFilters] = useState({ session_year: 2026 });
   const [isLoading, setIsLoading] = useState(true);
   const [showNewBillsModal, setShowNewBillsModal] = useState(false);
   const [selectedBill, setSelectedBill] = useState(null);

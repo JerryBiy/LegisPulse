@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Bill } from "@/entities/Bill";
-import { User } from "@/entities/User";
+import { base44 } from "@/api/base44Client";
 import { Bell, Star } from "lucide-react";
 import BillCard from "../components/bills/BillCard";
 import BillDetailsModal from "../components/bills/BillDetailsModal";
@@ -18,12 +17,12 @@ export default function TrackedBills() {
   const loadTrackedBills = async () => {
     setIsLoading(true);
     try {
-      const userData = await User.me();
+      const userData = await base44.auth.me();
       const billIds = userData?.tracked_bill_ids || [];
       setTrackedBillIds(billIds);
 
       if (billIds.length > 0) {
-        const bills = await Bill.list();
+        const bills = await base44.entities.Bill.list();
         const filtered = bills.filter(bill => billIds.includes(bill.id));
         setTrackedBills(filtered);
       }
@@ -37,7 +36,7 @@ export default function TrackedBills() {
     const newTrackedIds = trackedBillIds.filter(id => id !== billId);
     setTrackedBillIds(newTrackedIds);
     setTrackedBills(prev => prev.filter(bill => bill.id !== billId));
-    await User.updateMyUserData({ tracked_bill_ids: newTrackedIds });
+    await base44.auth.updateMe({ tracked_bill_ids: newTrackedIds });
   };
 
   return (

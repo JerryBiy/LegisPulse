@@ -101,16 +101,17 @@ export default function BillFilters({
             </Select>
 
             <Select
-              value={filters.session_year?.toString() || "2024"}
+              value={filters.session_year?.toString() || "2026"}
               onValueChange={(value) => onFilterChange({ ...filters, session_year: parseInt(value) })}
             >
               <SelectTrigger className="w-28 border-slate-200">
                 <SelectValue placeholder="Year" />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="2026">2026</SelectItem>
+                <SelectItem value="2025">2025</SelectItem>
                 <SelectItem value="2024">2024</SelectItem>
                 <SelectItem value="2023">2023</SelectItem>
-                <SelectItem value="2022">2022</SelectItem>
               </SelectContent>
             </Select>
 

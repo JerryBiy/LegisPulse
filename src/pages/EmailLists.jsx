@@ -1,8 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { EmailList } from "@/entities/EmailList";
-import { Bill } from "@/entities/Bill";
-import { User } from "@/entities/User";
-import { SendEmail } from "@/integrations/Core";
+import { base44 } from "@/api/base44Client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,9 +39,9 @@ export default function EmailLists() {
     setIsLoading(true);
     try {
       const [lists, user, bills] = await Promise.all([
-        EmailList.list("-created_date"),
-        User.me().catch(() => null),
-        Bill.list()
+        base44.entities.EmailList.list("-created_date"),
+        base44.auth.me().catch(() => null),
+        base44.entities.Bill.list()
       ]);
       
       setEmailLists(lists);
@@ -82,7 +79,7 @@ Your Legislative Team`;
       let successCount = 0;
       for (const email of emailList.email_addresses) {
         try {
-          await SendEmail({
+          await base44.integrations.Core.SendEmail({
             to: email,
             subject: `Legislative Update: ${trackedBills.length} Tracked Bills`,
             body: emailContent
@@ -192,7 +189,7 @@ Your Legislative Team`;
                         variant="ghost"
                         size="icon"
                         onClick={async () => {
-                          await EmailList.delete(list.id);
+                          await base44.entities.EmailList.delete(list.id);
                           loadData();
                         }}
                       >
@@ -317,9 +314,9 @@ function EmailListModal({ isOpen, onClose, editingList, onSave }) {
 
     try {
       if (editingList) {
-        await EmailList.update(editingList.id, formData);
+        await base44.entities.EmailList.update(editingList.id, formData);
       } else {
-        await EmailList.create(formData);
+        await base44.entities.EmailList.create(formData);
       }
       onSave();
       onClose();

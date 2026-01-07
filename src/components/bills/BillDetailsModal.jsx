@@ -20,7 +20,7 @@ import {
   BookOpen
 } from "lucide-react";
 import { format } from "date-fns";
-import { InvokeLLM } from "@/integrations/Core";
+import { base44 } from "@/api/base44Client";
 
 const getStatusColor = (status) => {
   const colors = {
@@ -67,7 +67,7 @@ Please provide:
 
 Keep the language accessible and explain any legal terms. Focus on real-world implications.`;
 
-      const response = await InvokeLLM({
+      const response = await base44.integrations.Core.InvokeLLM({
         prompt,
         response_json_schema: {
           type: "object",

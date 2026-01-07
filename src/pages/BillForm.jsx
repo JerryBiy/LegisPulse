@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Bill } from "@/entities/Bill";
+import { base44 } from "@/api/base44Client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,7 +27,7 @@ export default function BillForm() {
     lc_number: "",
     sponsor: "",
     co_sponsors: [],
-    session_year: 2024,
+    session_year: 2026,
     status: "introduced",
     current_committee: "",
     ocga_sections_affected: [],
@@ -62,7 +62,7 @@ export default function BillForm() {
     setIsSubmitting(true);
 
     try {
-      await Bill.create(billData);
+      await base44.entities.Bill.create(billData);
       navigate(createPageUrl("Dashboard"));
     } catch (error) {
       console.error("Error creating bill:", error);

@@ -38,10 +38,22 @@ const navigationItems = [
     description: "Your Monitored Legislation"
   },
   {
+    title: "Twitter Feed",
+    url: createPageUrl("TwitterFeed"),
+    icon: Twitter,
+    description: "Live Legislative Updates"
+  },
+  {
     title: "Email Lists",
     url: createPageUrl("EmailLists"),
     icon: Mail,
     description: "Manage Client Groups"
+  },
+  {
+    title: "Settings",
+    url: createPageUrl("Settings"),
+    icon: User,
+    description: "Notification Preferences"
   }
 ];
 
@@ -104,7 +116,7 @@ export default function Layout({ children, currentPageName }) {
               <SidebarGroupContent>
                 <div className="px-3 space-y-3">
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-600 font-medium">Session 2024</span>
+                    <span className="text-slate-600 font-medium">Session 2026</span>
                     <Badge variant="outline" className="text-xs">Active</Badge>
                   </div>
                   <div className="flex items-center justify-between text-sm">
