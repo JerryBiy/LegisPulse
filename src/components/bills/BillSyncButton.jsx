@@ -24,10 +24,16 @@ export default function BillSyncButton({ onSyncComplete }) {
 
       // Use InvokeLLM with web context to fetch bills from legis.ga.gov
       const response = await base44.integrations.Core.InvokeLLM({
-        prompt: `Go to https://www.legis.ga.gov and find all bills for the 2026 legislative session. 
-        
-For each bill, extract:
-- bill_number (e.g., HB 1, SB 23, HR 45)
+        prompt: `Go to https://www.legis.ga.gov and find ALL bills for the 2025-2026 Georgia legislative session (this is a two-year consecutive session).
+
+IMPORTANT: Get ALL bills starting from:
+- House Bills: HB 1, HB 2, HB 3... up to the most recent HB number
+- Senate Bills: SB 1, SB 2, SB 3... up to the most recent SB number
+- House Resolutions: HR 1, HR 2... up to the most recent
+- Senate Resolutions: SR 1, SR 2... up to the most recent
+
+For EACH bill, extract:
+- bill_number (e.g., HB 1, SB 23, HR 45, SR 12)
 - title (official title)
 - chamber (house or senate)
 - bill_type (bill, resolution, or constitutional_amendment)
@@ -35,8 +41,9 @@ For each bill, extract:
 - status (current status)
 - last_action (most recent action description)
 - last_action_date (date of last action)
+- session_year (2025 or 2026 based on when it was introduced)
 
-Return bills from both the House and Senate. Focus on bills from the 2026 session.`,
+Return a comprehensive list of ALL bills from the 2025-2026 session.`,
         add_context_from_internet: true,
         response_json_schema: {
           type: "object",
@@ -53,7 +60,8 @@ Return bills from both the House and Senate. Focus on bills from the 2026 sessio
                   sponsor: { type: "string" },
                   status: { type: "string" },
                   last_action: { type: "string" },
-                  last_action_date: { type: "string" }
+                  last_action_date: { type: "string" },
+                  session_year: { type: "integer" }
                 }
               }
             }
@@ -77,7 +85,7 @@ Return bills from both the House and Senate. Focus on bills from the 2026 sessio
             chamber: bill.chamber.toLowerCase(),
             bill_type: bill.bill_type || "bill",
             sponsor: bill.sponsor,
-            session_year: 2026,
+            session_year: bill.session_year || 2026,
             status: mapStatus(bill.status),
             last_action: bill.last_action,
             last_action_date: bill.last_action_date || new Date().toISOString().split('T')[0],
@@ -97,7 +105,7 @@ Return bills from both the House and Senate. Focus on bills from the 2026 sessio
 
       setSyncStatus({
         success: true,
-        message: `Synced ${bills.length} bills from legis.ga.gov`,
+        message: `Synced ${bills.length} bills from 2025-2026 GA session`,
         newBills: created,
         total: bills.length
       });

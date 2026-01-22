@@ -118,7 +118,7 @@ export default function Layout({ children, currentPageName }) {
               <SidebarGroupContent>
                 <div className="px-3 space-y-3">
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-600 font-medium">Session 2026</span>
+                    <span className="text-slate-600 font-medium">Session 2025-2026</span>
                     <Badge variant="outline" className="text-xs">Active</Badge>
                   </div>
                   <div className="flex items-center justify-between text-sm">

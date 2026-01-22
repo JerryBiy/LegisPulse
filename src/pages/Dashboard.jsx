@@ -113,7 +113,7 @@ export default function Dashboard() {
             <h1 className="text-3xl font-bold text-slate-900">Legislative Dashboard</h1>
             <p className="text-slate-600 mt-1 flex items-center gap-2">
               <Globe className="w-4 h-4" />
-              Live bills from legis.ga.gov - {filters.session_year || 2026} session
+              Live bills from legis.ga.gov - 2025-2026 session
             </p>
           </div>
           <BillSyncButton onSyncComplete={loadData} />
