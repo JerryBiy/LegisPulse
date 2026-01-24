@@ -30,7 +30,7 @@ export default function Dashboard() {
     setIsLoading(true);
     try {
       const [billsData, userData] = await Promise.all([
-        base44.entities.Bill.list("-created_date"),
+        base44.entities.Bill.list("-last_action_date"),
         base44.auth.me().catch(() => null)
       ]);
       setBills(billsData);

@@ -25,13 +25,15 @@ export default function BillSyncButton({ onSyncComplete }) {
       // Use LegiScan public API to fetch Georgia bills
       const response = await base44.integrations.Core.InvokeLLM({
         prompt: `Access the LegiScan public API (https://legiscan.com/gaits/documentation/legiscan) for Georgia state legislature.
-Use the API to fetch ALL bills from the 2025-2026 Georgia legislative session.
+Fetch EVERY SINGLE bill from the 2025-2026 Georgia legislative session.
 
-Get the most up-to-date information including:
-- ALL House Bills (HB) from the current session
-- ALL Senate Bills (SB) from the current session  
-- ALL House Resolutions (HR)
-- ALL Senate Resolutions (SR)
+CRITICAL: Get COMPLETE list from bill number 1 to the highest number:
+- House Bills: HB 1, HB 2, HB 3... ALL the way to the most recent HB number (could be HB 500, HB 1000, or higher)
+- Senate Bills: SB 1, SB 2, SB 3... ALL the way to the most recent SB number
+- House Resolutions: HR 1, HR 2... to the most recent HR
+- Senate Resolutions: SR 1, SR 2... to the most recent SR
+
+Do NOT skip any bills. If there are 800 House Bills, return all 800. If there are 400 Senate Bills, return all 400.
 
 For EACH bill, extract:
 - bill_number (e.g., HB 1, SB 23, HR 45, SR 12)
@@ -45,7 +47,7 @@ For EACH bill, extract:
 - session_year (2025 or 2026)
 - pdf_url (link to bill PDF if available)
 
-Return ALL bills with their most recent updates from the LegiScan API.`,
+Return the COMPLETE comprehensive list of ALL bills with their most recent updates.`,
         add_context_from_internet: true,
         response_json_schema: {
           type: "object",
