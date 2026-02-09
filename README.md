@@ -1,4 +1,4 @@
-## Legistrack GA
+## LegisPulse
 
 This project tracks Georgia legislative bills using the LegiScan API.
 

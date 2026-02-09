@@ -52,9 +52,9 @@ export default function BillDetailsModal({
   // Update document title when bill changes
   useEffect(() => {
     if (bill && isOpen) {
-      document.title = `${bill.bill_number} - Legistrack GA`;
+      document.title = `${bill.bill_number} - LegisPulse`;
     } else if (!isOpen) {
-      document.title = "Legistrack GA";
+      document.title = "LegisPulse";
     }
   }, [bill, isOpen]);
 

@@ -2,7 +2,7 @@
 // Provides simple async functions with slight latency to mimic network calls.
 
 const storage = typeof window === "undefined" ? null : window.localStorage;
-const STORE_KEY = "legistrack_mock_api_v1";
+const STORE_KEY = "legispulse_mock_api_v1";
 
 const seedBills = [
   {

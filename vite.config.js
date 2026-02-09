@@ -8,7 +8,7 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: process.env.PORT || 4000,
-    allowedHosts: ["legistrack-ga.onrender.com", ".onrender.com"],
+    allowedHosts: ["legispulse.onrender.com", ".onrender.com"],
   },
   resolve: {
     alias: {

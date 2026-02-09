@@ -1,14 +1,14 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import { createPageUrl } from "@/utils";
-import { 
-  LayoutDashboard, 
+import {
+  LayoutDashboard,
   Mail,
   Building2,
   Bell,
   User,
   Twitter,
-  Settings
+  Settings,
 } from "lucide-react";
 import {
   Sidebar,
@@ -31,32 +31,32 @@ const navigationItems = [
     title: "Dashboard",
     url: createPageUrl("Dashboard"),
     icon: LayoutDashboard,
-    description: "All Bills from legis.ga.gov"
+    description: "All Bills from legis.ga.gov",
   },
   {
     title: "Tracked Bills",
     url: createPageUrl("TrackedBills"),
     icon: Bell,
-    description: "Your Monitored Legislation"
+    description: "Your Monitored Legislation",
   },
   {
     title: "Twitter Feed",
     url: createPageUrl("TwitterFeed"),
     icon: Twitter,
-    description: "Live Legislative Updates"
+    description: "Live Legislative Updates",
   },
   {
     title: "Email Lists",
     url: createPageUrl("EmailLists"),
     icon: Mail,
-    description: "Manage Client Groups"
+    description: "Manage Client Groups",
   },
   {
     title: "Settings",
     url: createPageUrl("Settings"),
     icon: Settings,
-    description: "Notification Preferences"
-  }
+    description: "Notification Preferences",
+  },
 ];
 
 export default function Layout({ children, currentPageName }) {
@@ -72,12 +72,14 @@ export default function Layout({ children, currentPageName }) {
                 <Building2 className="w-6 h-6 text-white" />
               </div>
               <div>
-                <h2 className="font-bold text-slate-900 text-lg">LegisTracker</h2>
-                <p className="text-xs text-slate-500 font-medium">Georgia Legislature</p>
+                <h2 className="font-bold text-slate-900 text-lg">LegisPulse</h2>
+                <p className="text-xs text-slate-500 font-medium">
+                  Georgia Legislature
+                </p>
               </div>
             </div>
           </SidebarHeader>
-          
+
           <SidebarContent className="p-4">
             <SidebarGroup>
               <SidebarGroupLabel className="text-xs font-semibold text-slate-500 uppercase tracking-wider px-2 py-3">
@@ -87,18 +89,23 @@ export default function Layout({ children, currentPageName }) {
                 <SidebarMenu className="space-y-1">
                   {navigationItems.map((item) => (
                     <SidebarMenuItem key={item.title}>
-                      <SidebarMenuButton 
-                        asChild 
+                      <SidebarMenuButton
+                        asChild
                         className={`hover:bg-blue-50 hover:text-blue-700 transition-all duration-200 rounded-lg group ${
-                          location.pathname === item.url 
-                            ? 'bg-blue-50 text-blue-700 border-l-3 border-blue-600' 
-                            : 'text-slate-700'
+                          location.pathname === item.url
+                            ? "bg-blue-50 text-blue-700 border-l-3 border-blue-600"
+                            : "text-slate-700"
                         }`}
                       >
-                        <Link to={item.url} className="flex items-center gap-3 px-3 py-3">
+                        <Link
+                          to={item.url}
+                          className="flex items-center gap-3 px-3 py-3"
+                        >
                           <item.icon className="w-5 h-5" />
                           <div className="flex-1">
-                            <span className="font-semibold text-sm">{item.title}</span>
+                            <span className="font-semibold text-sm">
+                              {item.title}
+                            </span>
                             <p className="text-xs text-slate-500 group-hover:text-blue-600 transition-colors">
                               {item.description}
                             </p>
@@ -118,8 +125,12 @@ export default function Layout({ children, currentPageName }) {
               <SidebarGroupContent>
                 <div className="px-3 space-y-3">
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-600 font-medium">Session 2025-2026</span>
-                    <Badge variant="outline" className="text-xs">Active</Badge>
+                    <span className="text-slate-600 font-medium">
+                      Session 2025-2026
+                    </span>
+                    <Badge variant="outline" className="text-xs">
+                      Active
+                    </Badge>
                   </div>
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-slate-600">Total Bills</span>
@@ -140,8 +151,12 @@ export default function Layout({ children, currentPageName }) {
                 <User className="w-5 h-5 text-slate-600" />
               </div>
               <div className="flex-1 min-w-0">
-                <p className="font-semibold text-slate-900 text-sm truncate">Legislative User</p>
-                <p className="text-xs text-slate-500 truncate">Government Professional</p>
+                <p className="font-semibold text-slate-900 text-sm truncate">
+                  Legislative User
+                </p>
+                <p className="text-xs text-slate-500 truncate">
+                  Government Professional
+                </p>
               </div>
             </div>
           </SidebarFooter>
@@ -153,14 +168,12 @@ export default function Layout({ children, currentPageName }) {
               <SidebarTrigger className="hover:bg-slate-100 p-2 rounded-lg transition-colors" />
               <div className="flex items-center gap-2">
                 <Building2 className="w-5 h-5 text-blue-600" />
-                <h1 className="text-lg font-bold text-slate-900">LegisTracker</h1>
+                <h1 className="text-lg font-bold text-slate-900">LegisPulse</h1>
               </div>
             </div>
           </header>
 
-          <div className="flex-1 overflow-auto">
-            {children}
-          </div>
+          <div className="flex-1 overflow-auto">{children}</div>
         </main>
       </div>
     </SidebarProvider>
