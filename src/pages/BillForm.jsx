@@ -1,6 +1,6 @@
 // @ts-nocheck
 import React, { useState } from "react";
-import { base44 } from "@/api/base44Client";
+import { api as base44 } from "@/api/apiClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";

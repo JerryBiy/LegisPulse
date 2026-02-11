@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { base44 } from "@/api/base44Client";
+import { api as base44 } from "@/api/apiClient";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { RefreshCw, Download, CheckCircle, AlertCircle } from "lucide-react";
@@ -116,39 +116,53 @@ export default function BillSyncButton({ onSyncComplete }) {
         return;
       }
 
-      // Create new bills in database
-      let created = 0;
-      for (const bill of newBills) {
-        try {
-          await base44.entities.Bill.create({
-            bill_number: bill.bill_number,
-            title: bill.title,
-            chamber: bill.chamber,
-            bill_type: bill.bill_type,
-            sponsor: bill.sponsor,
-            session_year: bill.session_year,
-            status: bill.status,
-            last_action: bill.last_action,
-            last_action_date: bill.last_action_date,
-            pdf_url: bill.url,
-            is_tracked: false,
-            tags: [],
-          });
-          created++;
-          setProgress((prev) => ({
-            ...prev,
-            current: prev.current + 1,
-            newBills: created,
-          }));
-        } catch (error) {
-          console.error(`Error creating bill ${bill.bill_number}:`, error);
-        }
-      }
+      // Batch create new bills in database
+      // Format new bills for storage
+      const formattedNewBills = newBills.map((bill) => ({
+        bill_number: bill.bill_number,
+        title: bill.title,
+        chamber: bill.chamber,
+        bill_type: bill.bill_type,
+        sponsor: bill.sponsor,
+        session_year: bill.session_year,
+        status: bill.status,
+        last_action: bill.last_action,
+        last_action_date: bill.last_action_date,
+        pdf_url: bill.url,
+        is_tracked: false,
+        tags: [],
+      }));
+
+      // Batch create all new bills at once
+      const allBills = [
+        ...existingBills.map((b) => ({
+          bill_number: b.bill_number,
+          title: b.title,
+          chamber: b.chamber,
+          bill_type: b.bill_type,
+          sponsor: b.sponsor,
+          session_year: b.session_year,
+          status: b.status,
+          last_action: b.last_action,
+          last_action_date: b.last_action_date,
+          pdf_url: b.pdf_url,
+          is_tracked: b.is_tracked,
+          tags: b.tags,
+          id: b.id,
+        })),
+        ...formattedNewBills,
+      ];
+      await base44.entities.Bill.replaceAll(allBills);
+      setProgress((prev) => ({
+        ...prev,
+        current: newBills.length,
+        newBills: newBills.length,
+      }));
 
       setSyncStatus({
         success: true,
         message: `Synced ${bills.length} bills from LegiScan`,
-        newBills: created,
+        newBills: newBills.length,
         total: bills.length,
       });
 

@@ -1,15 +1,15 @@
 import React, { useState, useEffect } from "react";
-import { base44 } from "@/api/base44Client";
+import { api as base44 } from "@/api/apiClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { 
-  Bell, 
-  Twitter, 
-  FileText, 
+import {
+  Bell,
+  Twitter,
+  FileText,
   AlertCircle,
   Check,
-  Trash2
+  Trash2,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
@@ -31,10 +31,10 @@ export default function NotificationCenter({ userId, onClose }) {
       const notifs = await base44.entities.Notification.filter(
         { user_id: userId },
         "-created_date",
-        50
+        50,
       );
       setNotifications(notifs);
-      setUnreadCount(notifs.filter(n => !n.is_read).length);
+      setUnreadCount(notifs.filter((n) => !n.is_read).length);
     } catch (error) {
       console.error("Error loading notifications:", error);
     }
@@ -43,11 +43,15 @@ export default function NotificationCenter({ userId, onClose }) {
 
   const markAsRead = async (notificationId) => {
     try {
-      await base44.entities.Notification.update(notificationId, { is_read: true });
-      setNotifications(prev =>
-        prev.map(n => n.id === notificationId ? { ...n, is_read: true } : n)
+      await base44.entities.Notification.update(notificationId, {
+        is_read: true,
+      });
+      setNotifications((prev) =>
+        prev.map((n) =>
+          n.id === notificationId ? { ...n, is_read: true } : n,
+        ),
       );
-      setUnreadCount(prev => Math.max(0, prev - 1));
+      setUnreadCount((prev) => Math.max(0, prev - 1));
     } catch (error) {
       console.error("Error marking notification as read:", error);
     }
@@ -55,11 +59,13 @@ export default function NotificationCenter({ userId, onClose }) {
 
   const markAllAsRead = async () => {
     try {
-      const unreadIds = notifications.filter(n => !n.is_read).map(n => n.id);
+      const unreadIds = notifications
+        .filter((n) => !n.is_read)
+        .map((n) => n.id);
       for (const id of unreadIds) {
         await base44.entities.Notification.update(id, { is_read: true });
       }
-      setNotifications(prev => prev.map(n => ({ ...n, is_read: true })));
+      setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
       setUnreadCount(0);
     } catch (error) {
       console.error("Error marking all as read:", error);
@@ -69,7 +75,7 @@ export default function NotificationCenter({ userId, onClose }) {
   const deleteNotification = async (notificationId) => {
     try {
       await base44.entities.Notification.delete(notificationId);
-      setNotifications(prev => prev.filter(n => n.id !== notificationId));
+      setNotifications((prev) => prev.filter((n) => n.id !== notificationId));
     } catch (error) {
       console.error("Error deleting notification:", error);
     }
@@ -113,18 +119,12 @@ export default function NotificationCenter({ userId, onClose }) {
             <Bell className="w-5 h-5" />
             Notifications
             {unreadCount > 0 && (
-              <Badge className="bg-red-500 text-white">
-                {unreadCount}
-              </Badge>
+              <Badge className="bg-red-500 text-white">{unreadCount}</Badge>
             )}
           </CardTitle>
           <div className="flex gap-2">
             {unreadCount > 0 && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={markAllAsRead}
-              >
+              <Button variant="outline" size="sm" onClick={markAllAsRead}>
                 <Check className="w-4 h-4 mr-1" />
                 Mark all read
               </Button>
@@ -136,7 +136,9 @@ export default function NotificationCenter({ userId, onClose }) {
         {isLoading ? (
           <div className="p-8 text-center">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
-            <p className="mt-3 text-sm text-slate-600">Loading notifications...</p>
+            <p className="mt-3 text-sm text-slate-600">
+              Loading notifications...
+            </p>
           </div>
         ) : notifications.length > 0 ? (
           <div className="divide-y divide-slate-200">
@@ -160,8 +162,8 @@ export default function NotificationCenter({ userId, onClose }) {
                         <h4 className="font-semibold text-slate-900 text-sm">
                           {notification.title}
                         </h4>
-                        <Badge 
-                          variant="outline" 
+                        <Badge
+                          variant="outline"
                           className={`text-xs ${getPriorityColor(notification.priority)}`}
                         >
                           {notification.priority}
@@ -172,7 +174,10 @@ export default function NotificationCenter({ userId, onClose }) {
                       </p>
                       <div className="flex items-center justify-between">
                         <span className="text-xs text-slate-500">
-                          {formatDistanceToNow(new Date(notification.created_date), { addSuffix: true })}
+                          {formatDistanceToNow(
+                            new Date(notification.created_date),
+                            { addSuffix: true },
+                          )}
                         </span>
                         <div className="flex gap-1">
                           {!notification.is_read && (
@@ -197,7 +202,10 @@ export default function NotificationCenter({ userId, onClose }) {
                         </div>
                       </div>
                       {notification.sent_to_phone && (
-                        <Badge variant="outline" className="text-xs mt-2 bg-green-50 text-green-700">
+                        <Badge
+                          variant="outline"
+                          className="text-xs mt-2 bg-green-50 text-green-700"
+                        >
                           Sent to phone
                         </Badge>
                       )}
@@ -210,9 +218,12 @@ export default function NotificationCenter({ userId, onClose }) {
         ) : (
           <div className="p-8 text-center">
             <Bell className="w-12 h-12 text-slate-400 mx-auto mb-3" />
-            <h4 className="font-semibold text-slate-900 mb-2">No notifications</h4>
+            <h4 className="font-semibold text-slate-900 mb-2">
+              No notifications
+            </h4>
             <p className="text-sm text-slate-600">
-              You're all caught up! Notifications will appear here when there are updates.
+              You're all caught up! Notifications will appear here when there
+              are updates.
             </p>
           </div>
         )}

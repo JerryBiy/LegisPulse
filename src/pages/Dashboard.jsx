@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { base44 } from "@/api/base44Client";
+import { api as base44 } from "@/api/apiClient";
 import { FileText, Globe } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import BillCard from "../components/bills/BillCard";
@@ -28,6 +28,24 @@ export default function Dashboard() {
     loadData();
   }, []);
 
+  const fixBillTypes = (bills) => {
+    // Determine bill type from bill number
+    return bills.map((bill) => {
+      if (!bill.bill_number) return bill;
+      const normalized = bill.bill_number.trim().toUpperCase();
+      const correctType =
+        normalized.startsWith("HR") || normalized.startsWith("SR")
+          ? "resolution"
+          : "bill";
+
+      // Only update if different
+      if (bill.bill_type !== correctType) {
+        return { ...bill, bill_type: correctType };
+      }
+      return bill;
+    });
+  };
+
   const loadData = async () => {
     setIsLoading(true);
     try {
@@ -35,7 +53,9 @@ export default function Dashboard() {
         base44.entities.Bill.list("-last_action_date"),
         base44.auth.me().catch(() => null),
       ]);
-      setBills(billsData);
+      // Fix any incorrect bill types
+      const correctedBills = fixBillTypes(billsData);
+      setBills(correctedBills);
       setUser(userData);
       setTrackedBillIds(userData?.tracked_bill_ids || []);
     } catch (error) {

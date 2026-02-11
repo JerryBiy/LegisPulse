@@ -71,18 +71,22 @@ export async function fetchGABills(sessionId) {
     // LegiScan API returns 'number' field, not 'bill_number'
     const billNumber = bill.bill_number || bill.number;
 
+    // Try to get detailed status info, use last_action as the status description
+    const statusCode = bill.status || 1;
+    const statusDesc = bill.last_action || "Introduced";
+
     bills.push({
       legiscan_id: bill.bill_id,
       bill_number: billNumber,
       title: bill.title || bill.description,
       chamber: bill.chamber || bill.body || determineChamber(billNumber),
-      bill_type: determineBillType(bill.bill_type || bill.type),
+      bill_type: determineBillType(billNumber),
       sponsor: Array.isArray(bill.sponsors)
         ? bill.sponsors[0]?.name
         : bill.sponsors?.name || "Unknown",
       session_year: bill.session?.year_start || 2026,
-      status: mapLegiScanStatus(bill.status, bill.status_desc),
-      last_action: bill.last_action || bill.status_desc,
+      status: mapLegiScanStatus(statusCode, statusDesc),
+      last_action: bill.last_action || statusDesc,
       last_action_date: bill.last_action_date || bill.status_date,
       url: bill.state_link || bill.url,
     });
@@ -107,7 +111,7 @@ export async function fetchBillDetails(billId) {
     title: bill.title,
     description: bill.description,
     chamber: bill.chamber || bill.body || determineChamber(billNumber),
-    bill_type: determineBillType(bill.bill_type || bill.type),
+    bill_type: determineBillType(billNumber),
     sponsor: bill.sponsors?.[0]?.name || "Unknown",
     co_sponsors: bill.sponsors?.slice(1).map((s) => s.name) || [],
     session_year: bill.session?.year_start || 2026,
@@ -134,12 +138,16 @@ function determineChamber(billNumber) {
 }
 
 /**
- * Determine bill type from LegiScan bill_type
+ * Determine bill type from bill number prefix
+ * HB/SB = bill, HR/SR = resolution
  */
-function determineBillType(type) {
-  if (!type) return "bill";
-  const t = type.toLowerCase();
-  if (t.includes("resolution")) return "resolution";
+function determineBillType(billNumber) {
+  if (!billNumber) return "bill";
+  const normalized = billNumber.trim().toUpperCase();
+  // HR and SR are resolutions
+  if (normalized.startsWith("HR") || normalized.startsWith("SR")) {
+    return "resolution";
+  }
   return "bill";
 }
 
@@ -149,36 +157,86 @@ function determineBillType(type) {
 function mapLegiScanStatus(statusCode, statusDesc) {
   // LegiScan status codes: 1=Introduced, 2=In Committee, 3=Passed Chamber, 4=Crossover, 5=Passed, 6=Vetoed, 7=Failed
 
-  if (!statusDesc) return "introduced";
-  const desc = statusDesc.toLowerCase();
+  // Default to introduced if no data
+  if (!statusCode && !statusDesc) return "introduced";
 
-  if (statusCode === 6 || desc.includes("veto")) return "vetoed";
-  if (statusCode === 7 || desc.includes("fail") || desc.includes("dead"))
-    return "dead";
+  // Convert statusCode to number if it's a string
+  const code = parseInt(statusCode, 10) || 1;
+
+  // Normalize description to lowercase
+  const desc = (statusDesc || "").toLowerCase();
+
+  // Check descriptions for common LegiScan action text patterns
+
+  // Signed/Enacted
   if (
     desc.includes("signed") ||
     desc.includes("enacted") ||
     desc.includes("approved")
   )
     return "signed";
-  if (desc.includes("governor")) return "sent_to_governor";
-  if (statusCode === 5 || (desc.includes("passed") && desc.includes("both")))
-    return "passed_both_chambers";
+
+  // Vetoed/Failed/Dead
+  if (desc.includes("veto") || desc.includes("vetoed")) return "vetoed";
   if (
-    statusCode === 4 ||
-    desc.includes("crossover") ||
-    desc.includes("other chamber")
+    desc.includes("fail") ||
+    desc.includes("dead") ||
+    desc.includes("died in")
+  )
+    return "dead";
+
+  // Governor
+  if (desc.includes("governor") && !desc.includes("approved by"))
+    return "sent_to_governor";
+
+  // Passed both chambers
+  if (desc.includes("passed") && desc.includes("both"))
+    return "passed_both_chambers";
+
+  // Reading levels (check these early)
+  if (desc.includes("third") && desc.includes("read"))
+    return "passed_third_reading";
+  if (desc.includes("second") && desc.includes("read"))
+    return "passed_second_reading";
+  if (desc.includes("first") && desc.includes("read"))
+    return "passed_first_reading";
+
+  // Crossover / Sent to other chamber
+  if (desc.includes("crossover")) return "sent_to_other_chamber";
+  if (desc.includes("sent to")) return "sent_to_other_chamber";
+  if (
+    desc.includes("referred to") &&
+    (desc.includes("senate") || desc.includes("house"))
   )
     return "sent_to_other_chamber";
-  if (statusCode === 3 || (desc.includes("passed") && desc.includes("third")))
-    return "passed_third_reading";
-  if (desc.includes("passed") && desc.includes("second"))
-    return "passed_second_reading";
-  if (desc.includes("passed") && desc.includes("first"))
-    return "passed_first_reading";
-  if (statusCode === 2 || desc.includes("committee")) return "in_committee";
 
-  return "introduced";
+  // Committee actions
+  if (desc.includes("assigned to") || desc.includes("referred to"))
+    return "in_committee";
+  if (
+    (desc.includes("committee") || desc.includes("subcommittee")) &&
+    !desc.includes("passed")
+  )
+    return "in_committee";
+
+  // Fallback to status code
+  switch (code) {
+    case 6:
+      return "vetoed";
+    case 7:
+      return "dead";
+    case 5:
+      return "passed_both_chambers";
+    case 4:
+      return "sent_to_other_chamber";
+    case 3:
+      return "passed_third_reading";
+    case 2:
+      return "in_committee";
+    case 1:
+    default:
+      return "introduced";
+  }
 }
 
 /**

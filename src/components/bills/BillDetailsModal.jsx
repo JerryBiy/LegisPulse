@@ -20,7 +20,7 @@ import {
   BookOpen,
 } from "lucide-react";
 import { format } from "date-fns";
-import { base44 } from "@/api/base44Client";
+import { api as base44 } from "@/api/apiClient";
 
 const getStatusColor = (status) => {
   const colors = {

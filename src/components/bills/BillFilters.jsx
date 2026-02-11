@@ -115,6 +115,7 @@ export default function BillFilters({ filters, onFilterChange, billCounts }) {
                 </SelectItem>
                 <SelectItem value="signed">Signed</SelectItem>
                 <SelectItem value="vetoed">Vetoed</SelectItem>
+                <SelectItem value="dead">Dead</SelectItem>
               </SelectContent>
             </Select>
 
