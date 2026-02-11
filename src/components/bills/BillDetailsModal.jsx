@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { api as base44 } from "@/api/apiClient";
+import { fetchBillPDFLink } from "@/services/legiscan";
 
 const getStatusColor = (status) => {
   const colors = {
@@ -48,6 +49,40 @@ export default function BillDetailsModal({
 }) {
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [generatedSummary, setGeneratedSummary] = useState(null);
+  const [pdfLink, setPdfLink] = useState(null);
+  const [pdfStatus, setPdfStatus] = useState("idle");
+
+  useEffect(() => {
+    const currentLink = bill?.pdf_url || bill?.url || null;
+    if (currentLink) {
+      setPdfLink(currentLink);
+      setPdfStatus("ready");
+      return;
+    }
+
+    // No link yet; attempt to fetch from LegiScan if possible
+    setPdfLink(null);
+    setPdfStatus("loading");
+    if (!bill || !isOpen) return;
+
+    if (bill.legiscan_id) {
+      fetchBillPDFLink(bill.legiscan_id)
+        .then((link) => {
+          if (link) {
+            setPdfLink(link);
+            setPdfStatus("ready");
+          } else {
+            setPdfStatus("notfound");
+          }
+        })
+        .catch((err) => {
+          console.error("Failed to fetch PDF link", err);
+          setPdfStatus("notfound");
+        });
+    } else {
+      setPdfStatus("notfound");
+    }
+  }, [bill, isOpen]);
 
   // Update document title when bill changes
   useEffect(() => {
@@ -132,18 +167,24 @@ Keep the language accessible and explain any legal terms. Focus on real-world im
                   <StarOff className="w-5 h-5 text-slate-400" />
                 )}
               </Button>
-              {bill.pdf_url && (
-                <Button variant="outline" size="sm" asChild>
-                  <a
-                    href={bill.pdf_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <ExternalLink className="w-4 h-4 mr-2" />
-                    View PDF
-                  </a>
-                </Button>
-              )}
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={pdfStatus !== "ready"}
+                onClick={() => {
+                  if (pdfLink) {
+                    window.open(pdfLink, "_blank", "noopener,noreferrer");
+                  }
+                }}
+                className="gap-2"
+              >
+                <ExternalLink className="w-4 h-4" />
+                {pdfStatus === "ready"
+                  ? "View PDF"
+                  : pdfStatus === "loading"
+                    ? "Fetching PDF..."
+                    : "PDF not available"}
+              </Button>
             </div>
           </DialogTitle>
         </DialogHeader>

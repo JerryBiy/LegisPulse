@@ -28,141 +28,34 @@ export default function BillSyncButton({ onSyncComplete }) {
         );
       }
 
-      // Fetch current bills from database
-      const existingBills = await base44.entities.Bill.list();
-
-      // Fetch bills from LegiScan API
+      // Fetch bills from LegiScan API and replace store completely to ensure URLs are present
       const bills = await fetchGABills();
       setProgress((prev) => ({ ...prev, total: bills.length }));
 
-      // Count senate bills in new data
-      const newSenateBills = bills.filter((b) => b.chamber === "senate").length;
-
-      // Count senate bills in existing data
-      const existingSenateBills = existingBills.filter(
-        (b) => b.chamber === "senate",
-      ).length;
-
-      // If new data has senate bills but existing data has almost none, clear and rebuild
-      if (
-        newSenateBills > 100 &&
-        existingSenateBills < 50 &&
-        existingBills.length > 0
-      ) {
-        // Clear old bills and rebuild with new chamber assignments
-        await base44.entities.Bill.clearAll();
-        await base44.entities.Bill.replaceAll(
-          bills.map((bill) => ({
-            bill_number: bill.bill_number,
-            title: bill.title,
-            chamber: bill.chamber,
-            bill_type: bill.bill_type,
-            sponsor: bill.sponsor,
-            session_year: bill.session_year,
-            status: bill.status,
-            last_action: bill.last_action,
-            last_action_date: bill.last_action_date,
-            pdf_url: bill.url,
-            is_tracked: false,
-            tags: [],
-          })),
-        );
-        setSyncStatus({
-          success: true,
-          message: `Rebuilt bill store with correct chambers (${bills.length} bills)`,
-          newBills: bills.length,
-          total: bills.length,
-        });
-        if (onSyncComplete) onSyncComplete();
-        setIsSyncing(false);
-        return;
-      }
-
-      const existingBillNumbers = new Set(
-        existingBills.map((b) => b.bill_number),
-      );
-
-      // Filter out bills that already exist
-      const newBills = bills.filter(
-        (bill) => !existingBillNumbers.has(bill.bill_number),
-      );
-
-      // If nothing new but remote count exceeds local, rebuild store
-      if (newBills.length === 0 && existingBills.length < bills.length) {
-        await base44.entities.Bill.replaceAll(
-          bills.map((bill) => ({
-            bill_number: bill.bill_number,
-            title: bill.title,
-            chamber: bill.chamber,
-            bill_type: bill.bill_type,
-            sponsor: bill.sponsor,
-            session_year: bill.session_year,
-            status: bill.status,
-            last_action: bill.last_action,
-            last_action_date: bill.last_action_date,
-            pdf_url: bill.url,
-            is_tracked: false,
-            tags: [],
-          })),
-        );
-        setSyncStatus({
-          success: true,
-          message: `Rebuilt bill store from LegiScan (${bills.length} bills)`,
-          newBills: bills.length,
-          total: bills.length,
-        });
-        if (onSyncComplete) onSyncComplete();
-        setIsSyncing(false);
-        return;
-      }
-
-      // Batch create new bills in database
-      // Format new bills for storage
-      const formattedNewBills = newBills.map((bill) => ({
-        bill_number: bill.bill_number,
-        title: bill.title,
-        chamber: bill.chamber,
-        bill_type: bill.bill_type,
-        sponsor: bill.sponsor,
-        session_year: bill.session_year,
-        status: bill.status,
-        last_action: bill.last_action,
-        last_action_date: bill.last_action_date,
-        pdf_url: bill.url,
-        is_tracked: false,
-        tags: [],
-      }));
-
-      // Batch create all new bills at once
-      const allBills = [
-        ...existingBills.map((b) => ({
-          bill_number: b.bill_number,
-          title: b.title,
-          chamber: b.chamber,
-          bill_type: b.bill_type,
-          sponsor: b.sponsor,
-          session_year: b.session_year,
-          status: b.status,
-          last_action: b.last_action,
-          last_action_date: b.last_action_date,
-          pdf_url: b.pdf_url,
-          is_tracked: b.is_tracked,
-          tags: b.tags,
-          id: b.id,
+      await base44.entities.Bill.clearAll();
+      await base44.entities.Bill.replaceAll(
+        bills.map((bill) => ({
+          legiscan_id: bill.legiscan_id,
+          bill_number: bill.bill_number,
+          title: bill.title,
+          chamber: bill.chamber,
+          bill_type: bill.bill_type,
+          sponsor: bill.sponsor,
+          session_year: bill.session_year,
+          status: bill.status,
+          last_action: bill.last_action,
+          last_action_date: bill.last_action_date,
+          url: bill.url,
+          pdf_url: bill.url,
+          is_tracked: false,
+          tags: [],
         })),
-        ...formattedNewBills,
-      ];
-      await base44.entities.Bill.replaceAll(allBills);
-      setProgress((prev) => ({
-        ...prev,
-        current: newBills.length,
-        newBills: newBills.length,
-      }));
+      );
 
       setSyncStatus({
         success: true,
         message: `Synced ${bills.length} bills from LegiScan`,
-        newBills: newBills.length,
+        newBills: bills.length,
         total: bills.length,
       });
 
