@@ -10,14 +10,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
-import { Filter, Search, RefreshCw, Calendar } from "lucide-react";
+import { Filter, Search, RefreshCw } from "lucide-react";
 
-export default function BillFilters({
-  filters,
-  onFilterChange,
-  onShowNewBills,
-  billCounts,
-}) {
+export default function BillFilters({ filters, onFilterChange, billCounts }) {
   return (
     <Card className="bg-white border-slate-200">
       <CardContent className="p-6">
@@ -35,13 +30,6 @@ export default function BillFilters({
                 className="pl-10 border-slate-200 focus:border-blue-500 focus:ring-blue-500"
               />
             </div>
-            <Button
-              onClick={onShowNewBills}
-              className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
-            >
-              <Calendar className="w-4 h-4 mr-2" />
-              New Bills from Yesterday
-            </Button>
           </div>
 
           {/* Filter Controls */}
@@ -88,9 +76,6 @@ export default function BillFilters({
                 <SelectItem value="all">All Types</SelectItem>
                 <SelectItem value="bill">Bills</SelectItem>
                 <SelectItem value="resolution">Resolutions</SelectItem>
-                <SelectItem value="constitutional_amendment">
-                  Constitutional Amendments
-                </SelectItem>
               </SelectContent>
             </Select>
 

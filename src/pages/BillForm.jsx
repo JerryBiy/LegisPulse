@@ -144,9 +144,6 @@ export default function BillForm() {
                     <SelectContent>
                       <SelectItem value="bill">Bill</SelectItem>
                       <SelectItem value="resolution">Resolution</SelectItem>
-                      <SelectItem value="constitutional_amendment">
-                        Constitutional Amendment
-                      </SelectItem>
                     </SelectContent>
                   </Select>
                 </div>

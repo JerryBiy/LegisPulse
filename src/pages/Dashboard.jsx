@@ -4,7 +4,6 @@ import { FileText, Globe } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import BillCard from "../components/bills/BillCard";
 import BillFilters from "../components/bills/BillFilters";
-import NewBillsModal from "../components/bills/NewBillsModal";
 import BillDetailsModal from "../components/bills/BillDetailsModal";
 import BillSyncButton from "../components/bills/BillSyncButton";
 
@@ -21,7 +20,6 @@ export default function Dashboard() {
     session_year: null,
   });
   const [isLoading, setIsLoading] = useState(true);
-  const [showNewBillsModal, setShowNewBillsModal] = useState(false);
   const [selectedBill, setSelectedBill] = useState(null);
   const [user, setUser] = useState(null);
   const [trackedBillIds, setTrackedBillIds] = useState([]);
@@ -203,15 +201,6 @@ export default function Dashboard() {
     }
   };
 
-  const getNewBills = () => {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    return bills.filter((bill) => {
-      const created = new Date(bill.created_date);
-      return created >= yesterday;
-    });
-  };
-
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="max-w-7xl mx-auto p-6 space-y-6">
@@ -233,7 +222,6 @@ export default function Dashboard() {
         <BillFilters
           filters={filters}
           onFilterChange={setFilters}
-          onShowNewBills={() => setShowNewBillsModal(true)}
           billCounts={getBillCounts()}
         />
 
@@ -291,13 +279,6 @@ export default function Dashboard() {
       </div>
 
       {/* Modals */}
-      <NewBillsModal
-        isOpen={showNewBillsModal}
-        onClose={() => setShowNewBillsModal(false)}
-        bills={getNewBills()}
-        onViewBill={setSelectedBill}
-      />
-
       <BillDetailsModal
         bill={selectedBill}
         isOpen={!!selectedBill}
