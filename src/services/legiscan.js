@@ -8,6 +8,19 @@ const LEGISCAN_BASE_URL = "https://api.legiscan.com/";
 const GA_STATE_ID = 11;
 
 /**
+ * Fetch a direct PDF/state link for a bill by calling getBill
+ * and using the first text entry's state_link/url.
+ */
+export async function fetchBillPDFLink(legiscanBillId) {
+  if (!legiscanBillId) return null;
+  const data = await legiscanRequest("getBill", { id: legiscanBillId });
+  const texts = data.bill?.texts || [];
+  if (!texts.length) return data.bill?.state_link || data.bill?.url || null;
+  const preferred = texts[0];
+  return preferred.state_link || preferred.url || null;
+}
+
+/**
  * Make a request to LegiScan API
  */
 async function legiscanRequest(operation, params = {}) {

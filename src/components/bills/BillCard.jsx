@@ -89,7 +89,7 @@ export default function BillCard({
                 </>
               )}
             </Button>
-            {bill.pdf_url && (
+            {(bill.pdf_url || bill.url) && (
               <Button
                 variant="ghost"
                 size="icon"
@@ -97,7 +97,7 @@ export default function BillCard({
                 className="opacity-60 group-hover:opacity-100 transition-opacity"
               >
                 <a
-                  href={bill.pdf_url}
+                  href={bill.pdf_url || bill.url}
                   target="_blank"
                   rel="noopener noreferrer"
                 >
