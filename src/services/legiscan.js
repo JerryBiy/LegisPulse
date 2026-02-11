@@ -140,8 +140,6 @@ function determineBillType(type) {
   if (!type) return "bill";
   const t = type.toLowerCase();
   if (t.includes("resolution")) return "resolution";
-  if (t.includes("amendment") || t.includes("constitutional"))
-    return "constitutional_amendment";
   return "bill";
 }
 
