@@ -60,7 +60,21 @@ export default function Dashboard() {
         .split(/\s+/)
         .filter(Boolean);
 
+      // Check if search looks like a bill number (e.g., HB, HR, SB, SR)
+      const isBillNumberSearch = /^(hb|hr|sb|sr|hc|sc)/.test(
+        filters.search.toLowerCase().trim(),
+      );
+
       filtered = filtered.filter((bill) => {
+        // If searching for bill number prefix, only search in bill_number
+        if (isBillNumberSearch) {
+          const billNumberNormalized = normalize(bill.bill_number);
+          return searchTokens.every((token) =>
+            billNumberNormalized.includes(token),
+          );
+        }
+
+        // Otherwise, do full-text search
         const searchable = normalize(
           [
             bill.bill_number,

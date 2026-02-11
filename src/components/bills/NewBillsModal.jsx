@@ -1,4 +1,3 @@
-import React from "react";
 import {
   Dialog,
   DialogContent,
@@ -31,16 +30,18 @@ export default function NewBillsModal({ isOpen, onClose, bills, onViewBill }) {
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <div className="flex items-center gap-3 mb-2">
-                      <div className={`p-1.5 rounded ${
-                        bill.chamber === 'house' 
-                          ? 'bg-blue-100 text-blue-600' 
-                          : 'bg-purple-100 text-purple-600'
-                      }`}>
+                      <div
+                        className={`p-1.5 rounded ${
+                          bill.chamber === "house"
+                            ? "bg-blue-100 text-blue-600"
+                            : "bg-purple-100 text-purple-600"
+                        }`}
+                      >
                         <Building2 className="w-4 h-4" />
                       </div>
                       <h3 className="font-bold">{bill.bill_number}</h3>
                       <Badge variant="outline" className="text-xs">
-                        {bill.bill_type.replace(/_/g, ' ')}
+                        {bill.bill_type.replace(/_/g, " ")}
                       </Badge>
                     </div>
                     <h4 className="font-medium text-slate-900 mb-2 line-clamp-2">
@@ -50,7 +51,11 @@ export default function NewBillsModal({ isOpen, onClose, bills, onViewBill }) {
                       Sponsor: {bill.sponsor}
                     </p>
                     <p className="text-xs text-slate-500">
-                      Added {format(new Date(bill.created_date), "MMM d, yyyy 'at' h:mm a")}
+                      Added{" "}
+                      {format(
+                        new Date(bill.created_date),
+                        "MMM d, yyyy 'at' h:mm a",
+                      )}
                     </p>
                   </div>
                   <Button
@@ -70,7 +75,9 @@ export default function NewBillsModal({ isOpen, onClose, bills, onViewBill }) {
           ) : (
             <div className="text-center py-8">
               <Calendar className="w-12 h-12 text-slate-400 mx-auto mb-4" />
-              <h3 className="text-lg font-semibold text-slate-900 mb-2">No new bills</h3>
+              <h3 className="text-lg font-semibold text-slate-900 mb-2">
+                No new bills
+              </h3>
               <p className="text-slate-600">No bills were added yesterday.</p>
             </div>
           )}
