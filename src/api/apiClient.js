@@ -13,6 +13,13 @@ let memoryData = {
 };
 let useMemoryStore = false;
 
+const getDefaultUser = () => ({
+  id: "local-user",
+  name: "Local User",
+  email: "local@example.com",
+  tracked_bill_ids: [],
+});
+
 const loadData = () => {
   if (useMemoryStore || !storage) return { ...memoryData };
   try {
@@ -67,12 +74,25 @@ export const api = {
     async me() {
       await delay();
       const data = loadData();
-      return data.user || null;
+      if (!data.user) {
+        const user = getDefaultUser();
+        saveData({ ...data, user });
+        return user;
+      }
+      return data.user;
     },
     async updateMe(patch) {
       await delay();
       const data = loadData();
-      const updated = { ...data.user, ...patch };
+      const baseUser = data.user || getDefaultUser();
+      const updated = {
+        ...baseUser,
+        ...patch,
+        tracked_bill_ids:
+          patch.tracked_bill_ids !== undefined
+            ? patch.tracked_bill_ids
+            : baseUser.tracked_bill_ids || [],
+      };
       saveData({ ...data, user: updated });
       return updated;
     },

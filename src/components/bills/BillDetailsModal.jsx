@@ -124,7 +124,7 @@ Keep the language accessible and explain any legal terms. Focus on real-world im
               <Button
                 variant="ghost"
                 size="icon"
-                onClick={() => onToggleTracking(bill.id)}
+                onClick={() => onToggleTracking(bill.id, bill.bill_number)}
               >
                 {isTracked ? (
                   <Star className="w-5 h-5 text-yellow-500 fill-yellow-500" />

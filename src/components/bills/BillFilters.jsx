@@ -8,7 +8,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from "@/components/ui/select.jsx";
 import { Input } from "@/components/ui/input";
 import { Filter, Search, RefreshCw } from "lucide-react";
 
