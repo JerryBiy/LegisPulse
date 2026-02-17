@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,6 +42,18 @@ export default function BillCard({
   isTracked,
 }) {
   const ChamberIcon = getChamberIcon(bill.chamber);
+  const [showAllSponsors, setShowAllSponsors] = useState(false);
+  const allSponsors =
+    Array.isArray(bill.sponsors) && bill.sponsors.length
+      ? bill.sponsors
+      : [bill.sponsor, ...(bill.co_sponsors || [])].filter(Boolean);
+  const sponsorsText = allSponsors.length ? allSponsors.join(", ") : "Unknown";
+  const sponsorCharLimit = 28;
+  const isSponsorTruncated = sponsorsText.length > sponsorCharLimit;
+  const visibleSponsors =
+    showAllSponsors || !isSponsorTruncated
+      ? sponsorsText
+      : sponsorsText.slice(0, sponsorCharLimit).trimEnd();
 
   return (
     <Card className="hover:shadow-lg transition-all duration-300 border border-slate-200 bg-white group">
@@ -123,7 +136,18 @@ export default function BillCard({
 
         <div className="flex items-center gap-2 text-sm">
           <User className="w-4 h-4 text-slate-400" />
-          <span className="text-slate-600 font-medium">{bill.sponsor}</span>
+          <span className="text-slate-600 font-medium break-all">
+            {visibleSponsors}
+            {isSponsorTruncated && (
+              <button
+                type="button"
+                className="ml-1 text-blue-600 hover:text-blue-700"
+                onClick={() => setShowAllSponsors((prev) => !prev)}
+              >
+                {showAllSponsors ? "less" : "..."}
+              </button>
+            )}
+          </span>
         </div>
 
         {bill.last_action_date && (

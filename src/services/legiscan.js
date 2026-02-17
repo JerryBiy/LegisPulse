@@ -18,16 +18,41 @@ const isPdfMime = (mime) => {
   return String(mime).toLowerCase().includes("pdf");
 };
 
+const extractSponsorNames = (sponsors) => {
+  if (!Array.isArray(sponsors)) return [];
+  return sponsors
+    .map((sponsor) => sponsor?.name)
+    .filter((name) => typeof name === "string" && name.trim().length > 0);
+};
+
+const extractBillNumberValue = (billNumber) => {
+  const number = parseInt(
+    String(billNumber || "").replace(/\D/g, "") || "0",
+    10,
+  );
+  return Number.isNaN(number) ? 0 : number;
+};
+
+const hasSponsorData = (bill) => {
+  if (!bill) return false;
+  if (Array.isArray(bill.sponsors) && bill.sponsors.length > 0) return true;
+  const sponsor = String(bill.sponsor || "").trim();
+  return sponsor.length > 0 && sponsor.toLowerCase() !== "unknown";
+};
+
 /**
  * Fetch a direct PDF/text link for a bill.
  * Uses getBill to enumerate text versions, then getBillText for the newest
  * text first so we can prefer a direct PDF link when available.
  */
 export async function fetchBillPDFLink(legiscanBillId) {
-  if (!legiscanBillId) return null;
+  if (!legiscanBillId) {
+    return { pdfLink: null, sponsorNames: [] };
+  }
 
   const data = await legiscanRequest("getBill", { id: legiscanBillId });
   const bill = data.bill || {};
+  const sponsorNames = extractSponsorNames(bill.sponsors);
   const texts = Array.isArray(bill.texts) ? [...bill.texts] : [];
 
   // Prefer most recent text documents first.
@@ -46,7 +71,7 @@ export async function fetchBillPDFLink(legiscanBillId) {
       const direct = textItem?.state_link || textItem?.url || null;
       if (direct && !fallbackTextLink) fallbackTextLink = direct;
       if (isLikelyPdfUrl(direct) || isPdfMime(textItem?.mime)) {
-        return direct;
+        return { pdfLink: direct, sponsorNames };
       }
       continue;
     }
@@ -64,7 +89,7 @@ export async function fetchBillPDFLink(legiscanBillId) {
       if (direct && !fallbackTextLink) fallbackTextLink = direct;
 
       if (isLikelyPdfUrl(direct) || isPdfMime(text.mime || textItem?.mime)) {
-        return direct;
+        return { pdfLink: direct, sponsorNames };
       }
     } catch (error) {
       // Continue trying older text records.
@@ -72,7 +97,10 @@ export async function fetchBillPDFLink(legiscanBillId) {
     }
   }
 
-  return fallbackTextLink || bill.state_link || bill.url || null;
+  return {
+    pdfLink: fallbackTextLink || bill.state_link || bill.url || null,
+    sponsorNames,
+  };
 }
 
 /**
@@ -152,12 +180,63 @@ export async function fetchGABills(sessionId) {
       sponsor: Array.isArray(bill.sponsors)
         ? bill.sponsors[0]?.name
         : bill.sponsors?.name || "Unknown",
+      sponsors: extractSponsorNames(bill.sponsors),
+      co_sponsors: Array.isArray(bill.sponsors)
+        ? bill.sponsors
+            .slice(1)
+            .map((sponsor) => sponsor?.name)
+            .filter(Boolean)
+        : [],
       session_year: bill.session?.year_start || 2026,
       status: mapLegiScanStatus(statusCode, statusDesc),
       last_action: bill.last_action || statusDesc,
       last_action_date: bill.last_action_date || bill.status_date,
       url: bill.state_link || bill.url,
     });
+  }
+
+  // Master list can be missing sponsor names for many bills.
+  // Enrich missing sponsors with getBill so cards do not show "Unknown" after sync.
+  const MAX_SPONSOR_ENRICHMENT = 200;
+  const ENRICHMENT_CONCURRENCY = 8;
+
+  const billsNeedingSponsors = bills
+    .filter((bill) => bill.legiscan_id && !hasSponsorData(bill))
+    .sort(
+      (a, b) =>
+        extractBillNumberValue(b.bill_number) -
+        extractBillNumberValue(a.bill_number),
+    )
+    .slice(0, MAX_SPONSOR_ENRICHMENT);
+
+  for (
+    let i = 0;
+    i < billsNeedingSponsors.length;
+    i += ENRICHMENT_CONCURRENCY
+  ) {
+    const chunk = billsNeedingSponsors.slice(i, i + ENRICHMENT_CONCURRENCY);
+
+    await Promise.allSettled(
+      chunk.map(async (billRecord) => {
+        try {
+          const detailData = await legiscanRequest("getBill", {
+            id: billRecord.legiscan_id,
+          });
+          const sponsorNames = extractSponsorNames(detailData.bill?.sponsors);
+
+          if (sponsorNames.length > 0) {
+            billRecord.sponsor = sponsorNames[0];
+            billRecord.sponsors = sponsorNames;
+            billRecord.co_sponsors = sponsorNames.slice(1);
+          }
+        } catch (error) {
+          console.warn(
+            `Failed sponsor enrichment for bill ${billRecord.legiscan_id}:`,
+            error,
+          );
+        }
+      }),
+    );
   }
 
   return bills;
@@ -181,6 +260,7 @@ export async function fetchBillDetails(billId) {
     chamber: bill.chamber || bill.body || determineChamber(billNumber),
     bill_type: determineBillType(billNumber),
     sponsor: bill.sponsors?.[0]?.name || "Unknown",
+    sponsors: extractSponsorNames(bill.sponsors),
     co_sponsors: bill.sponsors?.slice(1).map((s) => s.name) || [],
     session_year: bill.session?.year_start || 2026,
     status: mapLegiScanStatus(bill.status, bill.status_desc),

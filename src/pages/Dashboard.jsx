@@ -249,6 +249,19 @@ export default function Dashboard() {
     }
   };
 
+  const handleBillUpdate = useCallback((updatedBill) => {
+    if (!updatedBill?.id) return;
+
+    setBills((prev) =>
+      prev.map((bill) => (bill.id === updatedBill.id ? updatedBill : bill)),
+    );
+
+    setSelectedBill((prev) => {
+      if (!prev || prev.id !== updatedBill.id) return prev;
+      return { ...prev, ...updatedBill };
+    });
+  }, []);
+
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="max-w-7xl mx-auto p-6 space-y-6">
@@ -335,6 +348,7 @@ export default function Dashboard() {
           selectedBill ? trackedBillIds.includes(selectedBill.id) : false
         }
         onToggleTracking={handleToggleTracking}
+        onBillUpdate={handleBillUpdate}
       />
     </div>
   );

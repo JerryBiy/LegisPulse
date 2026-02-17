@@ -51,11 +51,26 @@ export default function BillDetailsModal({
   onClose,
   isTracked,
   onToggleTracking,
+  onBillUpdate,
 }) {
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [generatedSummary, setGeneratedSummary] = useState(null);
   const [pdfLink, setPdfLink] = useState(null);
   const [pdfStatus, setPdfStatus] = useState("idle");
+  const [resolvedSponsors, setResolvedSponsors] = useState([]);
+
+  useEffect(() => {
+    if (!bill) {
+      setResolvedSponsors([]);
+      return;
+    }
+
+    const initialSponsors =
+      Array.isArray(bill.sponsors) && bill.sponsors.length
+        ? bill.sponsors
+        : [bill.sponsor, ...(bill.co_sponsors || [])].filter(Boolean);
+    setResolvedSponsors(initialSponsors);
+  }, [bill]);
 
   useEffect(() => {
     if (!bill || !isOpen) return;
@@ -79,16 +94,56 @@ export default function BillDetailsModal({
 
     if (bill.legiscan_id) {
       fetchBillPDFLink(bill.legiscan_id)
-        .then(async (link) => {
+        .then(async (result) => {
+          const link = result?.pdfLink || null;
+          const sponsorNames = Array.isArray(result?.sponsorNames)
+            ? result.sponsorNames
+            : [];
+
+          if (sponsorNames.length > 0) {
+            setResolvedSponsors(sponsorNames);
+          }
+
           if (link) {
             setPdfLink(link);
             setPdfStatus("ready");
 
-            if (bill.id && link !== bill.pdf_url) {
+            if (bill.id) {
+              const primarySponsor =
+                sponsorNames[0] || bill.sponsor || "Unknown";
+              const coSponsors = sponsorNames.slice(1);
+              const existingSponsors = Array.isArray(bill.sponsors)
+                ? bill.sponsors
+                : [];
+
+              const needsPdfUpdate = link !== bill.pdf_url;
+              const needsSponsorUpdate =
+                sponsorNames.length > 0 &&
+                (primarySponsor !== bill.sponsor ||
+                  JSON.stringify(sponsorNames) !==
+                    JSON.stringify(existingSponsors) ||
+                  JSON.stringify(coSponsors) !==
+                    JSON.stringify(
+                      Array.isArray(bill.co_sponsors) ? bill.co_sponsors : [],
+                    ));
+
+              if (!needsPdfUpdate && !needsSponsorUpdate) {
+                return;
+              }
+
               try {
-                await base44.entities.Bill.update(bill.id, { pdf_url: link });
+                const updatedBill = await base44.entities.Bill.update(bill.id, {
+                  pdf_url: link,
+                  sponsor: primarySponsor,
+                  sponsors: sponsorNames,
+                  co_sponsors: coSponsors,
+                });
+
+                if (onBillUpdate && updatedBill) {
+                  onBillUpdate(updatedBill);
+                }
               } catch (error) {
-                console.warn("Failed to cache resolved PDF URL", error);
+                console.warn("Failed to cache resolved bill metadata", error);
               }
             }
           } else {
@@ -114,6 +169,12 @@ export default function BillDetailsModal({
   }, [bill, isOpen]);
 
   if (!bill) return null;
+
+  const allSponsors =
+    resolvedSponsors.length > 0
+      ? resolvedSponsors
+      : [bill.sponsor, ...(bill.co_sponsors || [])].filter(Boolean);
+  const sponsorsText = allSponsors.length ? allSponsors.join(", ") : "Unknown";
 
   const generateAISummary = async () => {
     setIsGeneratingSummary(true);
@@ -231,7 +292,7 @@ Keep the language accessible and explain any legal terms. Focus on real-world im
                 <div className="flex items-center gap-2">
                   <User className="w-4 h-4 text-slate-400" />
                   <span className="text-sm">
-                    <strong>Sponsor:</strong> {bill.sponsor}
+                    <strong>Sponsors:</strong> {sponsorsText}
                   </span>
                 </div>
                 {bill.last_action_date && (
