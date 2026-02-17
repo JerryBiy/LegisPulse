@@ -90,48 +90,75 @@ export default function Dashboard() {
           .replace(/[^a-z0-9]+/g, " ")
           .trim();
 
+      const normalizeCompact = (value) => normalize(value).replace(/\s+/g, "");
+
       const searchTokens = normalize(filters.search)
         .split(/\s+/)
         .filter(Boolean);
 
+      const searchCompact = normalizeCompact(filters.search);
+
       // Check if search looks like a bill number (e.g., HB, HR, SB, SR)
-      const isBillNumberSearch = /^(hb|hr|sb|sr|hc|sc)/.test(
-        filters.search.toLowerCase().trim(),
-      );
+      const isBillNumberSearch = /^(hb|hr|sb|sr|hc|sc)/.test(searchCompact);
 
-      filtered = filtered.filter((bill) => {
-        // If searching for bill number prefix, only search in bill_number
-        if (isBillNumberSearch) {
-          const billNumberNormalized = normalize(bill.bill_number);
-          return searchTokens.every((token) =>
-            billNumberNormalized.includes(token),
-          );
+      if (isBillNumberSearch) {
+        const exactBillMatch = searchCompact.match(
+          /^(hb|hr|sb|sr|hc|sc)(\d+)$/,
+        );
+
+        // For exact bill-number input like "hb10" or "hb 10", require exact match.
+        if (exactBillMatch) {
+          const queryPrefix = exactBillMatch[1];
+          const queryNumber = parseInt(exactBillMatch[2], 10);
+
+          filtered = filtered.filter((bill) => {
+            const billCompact = normalizeCompact(bill.bill_number);
+            const billMatch = billCompact.match(/^(hb|hr|sb|sr|hc|sc)(\d+)$/);
+            if (!billMatch) return false;
+
+            const billPrefix = billMatch[1];
+            const billNumber = parseInt(billMatch[2], 10);
+            return billPrefix === queryPrefix && billNumber === queryNumber;
+          });
+        } else {
+          // Prefix-only or partial bill-number searches still do bill-number-only matching.
+          filtered = filtered.filter((bill) => {
+            const billNumberNormalized = normalize(bill.bill_number);
+            const billNumberCompact = normalizeCompact(bill.bill_number);
+            return searchTokens.every(
+              (token) =>
+                billNumberNormalized.includes(token) ||
+                billNumberCompact.includes(token.replace(/\s+/g, "")),
+            );
+          });
         }
+      } else {
+        filtered = filtered.filter((bill) => {
+          // Otherwise, do full-text search
+          const searchable = normalize(
+            [
+              bill.bill_number,
+              bill.title,
+              bill.sponsor,
+              bill.summary,
+              bill.current_committee,
+              bill.last_action,
+              bill.lc_number,
+              bill.status,
+              bill.bill_type,
+              bill.chamber,
+              bill.session_year,
+            ].join(" "),
+          );
+          const searchableCompact = searchable.replace(/\s+/g, "");
 
-        // Otherwise, do full-text search
-        const searchable = normalize(
-          [
-            bill.bill_number,
-            bill.title,
-            bill.sponsor,
-            bill.summary,
-            bill.current_committee,
-            bill.last_action,
-            bill.lc_number,
-            bill.status,
-            bill.bill_type,
-            bill.chamber,
-            bill.session_year,
-          ].join(" "),
-        );
-        const searchableCompact = searchable.replace(/\s+/g, "");
-
-        return searchTokens.every(
-          (token) =>
-            searchable.includes(token) ||
-            searchableCompact.includes(token.replace(/\s+/g, "")),
-        );
-      });
+          return searchTokens.every(
+            (token) =>
+              searchable.includes(token) ||
+              searchableCompact.includes(token.replace(/\s+/g, "")),
+          );
+        });
+      }
     }
 
     if (filters.chamber) {
