@@ -21,24 +21,82 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { api as base44 } from "@/api/apiClient";
-import { fetchBillPDFLink } from "@/services/legiscan";
+import { fetchBillPDFLink, fetchBillTextForAI } from "@/services/legiscan";
 
 const isLikelyPdfUrl = (url) => {
   if (!url) return false;
   return String(url).toLowerCase().includes(".pdf");
 };
 
-const asSafeText = (value) => {
+const formatKeyLabel = (key) =>
+  String(key || "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+
+const formatAiText = (value) => {
   if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return formatAiText(parsed);
+      } catch {
+        return trimmed;
+      }
+    }
+    return trimmed;
+  }
+
   if (typeof value === "number" || typeof value === "boolean") {
     return String(value);
   }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => formatAiText(item))
+      .filter(Boolean)
+      .join("\n");
   }
+
+  if (typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, entryValue]) => {
+        const formattedValue = formatAiText(entryValue);
+        if (!formattedValue) return "";
+        return `${formatKeyLabel(key)}: ${formattedValue}`;
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  return String(value);
+};
+
+const pickSectionText = (response, keys = []) => {
+  if (!response || typeof response !== "object") return "";
+
+  for (const key of keys) {
+    const direct = formatAiText(response[key]);
+    if (direct) return direct;
+  }
+
+  for (const nested of Object.values(response)) {
+    if (!nested || typeof nested !== "object" || Array.isArray(nested))
+      continue;
+    for (const key of keys) {
+      const nestedValue = formatAiText(nested[key]);
+      if (nestedValue) return nestedValue;
+    }
+  }
+
+  return "";
 };
 
 const getStatusColor = (status) => {
@@ -85,6 +143,11 @@ export default function BillDetailsModal({
         : [bill.sponsor, ...(bill.co_sponsors || [])].filter(Boolean);
     setResolvedSponsors(initialSponsors);
   }, [bill]);
+
+  useEffect(() => {
+    setGeneratedSummary(null);
+    setAiError("");
+  }, [bill?.id, isOpen]);
 
   useEffect(() => {
     if (!bill || !isOpen) return;
@@ -189,8 +252,8 @@ export default function BillDetailsModal({
       ? resolvedSponsors
       : [bill.sponsor, ...(bill.co_sponsors || [])].filter(Boolean);
   const sponsorsText = allSponsors.length ? allSponsors.join(", ") : "Unknown";
-  const safeBillSummary = asSafeText(bill.summary);
-  const safeBillChanges = asSafeText(bill.changes_analysis);
+  const safeBillSummary = formatAiText(bill.summary);
+  const safeBillChanges = formatAiText(bill.changes_analysis);
 
   const generateAISummary = async () => {
     setIsGeneratingSummary(true);
@@ -198,9 +261,36 @@ export default function BillDetailsModal({
     try {
       const ocgaSections =
         bill.ocga_sections_affected?.join(", ") || "various sections";
+      let billTextContext = "";
+
+      if (bill.legiscan_id) {
+        try {
+          billTextContext = await fetchBillTextForAI(bill.legiscan_id);
+        } catch (error) {
+          console.warn("Unable to fetch bill text for AI context", error);
+        }
+      }
+
+      const fallbackContext = [
+        bill.title,
+        bill.summary,
+        bill.last_action,
+        bill.status,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+
+      const aiContext = (billTextContext || fallbackContext || "").slice(
+        0,
+        30000,
+      );
+
       const prompt = `Analyze Georgia legislative bill ${bill.bill_number} titled "${bill.title}".
 
 This bill affects OCGA sections: ${ocgaSections}
+
+Bill text and context:
+${aiContext || "Text not available from source."}
 
 Please provide:
 1. A high school level summary explaining what this bill does in simple terms
@@ -224,11 +314,43 @@ Keep the language accessible and explain any legal terms. Focus on real-world im
       });
 
       const normalizedSummary = {
-        plain_language_summary: asSafeText(response?.plain_language_summary),
-        law_changes: asSafeText(response?.law_changes),
-        affected_parties: asSafeText(response?.affected_parties),
-        practical_impact: asSafeText(response?.practical_impact),
+        plain_language_summary: pickSectionText(response, [
+          "plain_language_summary",
+          "summary",
+          "plain_summary",
+          "overview",
+        ]),
+        law_changes: pickSectionText(response, [
+          "law_changes",
+          "changes",
+          "legal_changes",
+          "statutory_changes",
+        ]),
+        affected_parties: pickSectionText(response, [
+          "affected_parties",
+          "who_is_affected",
+          "impacted_groups",
+          "affected",
+        ]),
+        practical_impact: pickSectionText(response, [
+          "practical_impact",
+          "impact",
+          "real_world_impact",
+          "practical_effects",
+        ]),
       };
+
+      const hasAnySection = Object.values(normalizedSummary).some(Boolean);
+      if (!hasAnySection) {
+        const fallback = formatAiText(response);
+        if (fallback) {
+          normalizedSummary.plain_language_summary = fallback;
+        } else {
+          throw new Error(
+            "AI returned an empty summary. Please click Regenerate Summary.",
+          );
+        }
+      }
 
       setGeneratedSummary(normalizedSummary);
 
@@ -413,25 +535,25 @@ Keep the language accessible and explain any legal terms. Focus on real-world im
                   <Sparkles className="w-5 h-5 text-purple-500" />
                   AI Analysis
                 </CardTitle>
-                {!bill.summary && !generatedSummary && (
-                  <Button
-                    onClick={generateAISummary}
-                    disabled={isGeneratingSummary}
-                    className="bg-purple-600 hover:bg-purple-700"
-                  >
-                    {isGeneratingSummary ? (
-                      <>
-                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />
-                        Generating...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-4 h-4 mr-2" />
-                        Generate Summary
-                      </>
-                    )}
-                  </Button>
-                )}
+                <Button
+                  onClick={generateAISummary}
+                  disabled={isGeneratingSummary}
+                  className="bg-purple-600 hover:bg-purple-700"
+                >
+                  {isGeneratingSummary ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4 mr-2" />
+                      {safeBillSummary || generatedSummary
+                        ? "Regenerate Summary"
+                        : "Generate Summary"}
+                    </>
+                  )}
+                </Button>
               </div>
             </CardHeader>
             <CardContent>
@@ -440,13 +562,15 @@ Keep the language accessible and explain any legal terms. Focus on real-world im
               )}
               {safeBillSummary ? (
                 <div className="prose prose-slate max-w-none">
-                  <p>{safeBillSummary}</p>
+                  <p className="whitespace-pre-line">{safeBillSummary}</p>
                   {safeBillChanges && (
                     <div className="mt-4 p-4 bg-blue-50 rounded-lg">
                       <h4 className="font-semibold text-blue-900 mb-2">
                         Changes Analysis:
                       </h4>
-                      <p className="text-blue-800">{safeBillChanges}</p>
+                      <p className="text-blue-800 whitespace-pre-line">
+                        {safeBillChanges}
+                      </p>
                     </div>
                   )}
                 </div>
@@ -456,7 +580,7 @@ Keep the language accessible and explain any legal terms. Focus on real-world im
                     <h4 className="font-semibold text-slate-900 mb-2">
                       Plain Language Summary:
                     </h4>
-                    <p className="text-slate-700">
+                    <p className="text-slate-700 whitespace-pre-line">
                       {generatedSummary.plain_language_summary}
                     </p>
                   </div>
@@ -464,7 +588,7 @@ Keep the language accessible and explain any legal terms. Focus on real-world im
                     <h4 className="font-semibold text-slate-900 mb-2">
                       Law Changes:
                     </h4>
-                    <p className="text-slate-700">
+                    <p className="text-slate-700 whitespace-pre-line">
                       {generatedSummary.law_changes}
                     </p>
                   </div>
@@ -472,7 +596,7 @@ Keep the language accessible and explain any legal terms. Focus on real-world im
                     <h4 className="font-semibold text-slate-900 mb-2">
                       Affected Parties:
                     </h4>
-                    <p className="text-slate-700">
+                    <p className="text-slate-700 whitespace-pre-line">
                       {generatedSummary.affected_parties}
                     </p>
                   </div>
@@ -480,7 +604,7 @@ Keep the language accessible and explain any legal terms. Focus on real-world im
                     <h4 className="font-semibold text-slate-900 mb-2">
                       Practical Impact:
                     </h4>
-                    <p className="text-slate-700">
+                    <p className="text-slate-700 whitespace-pre-line">
                       {generatedSummary.practical_impact}
                     </p>
                   </div>

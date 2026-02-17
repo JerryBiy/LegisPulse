@@ -40,6 +40,75 @@ const hasSponsorData = (bill) => {
   return sponsor.length > 0 && sponsor.toLowerCase() !== "unknown";
 };
 
+const stripHtml = (value) =>
+  String(value || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const decodeBase64IfLikely = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  const base64Like = /^[A-Za-z0-9+/=\r\n]+$/.test(raw) && raw.length % 4 === 0;
+  if (!base64Like || typeof atob !== "function") {
+    return raw;
+  }
+
+  try {
+    const decoded = atob(raw);
+    const printableCount = decoded.split("").filter((char) => {
+      const code = char.charCodeAt(0);
+      return (
+        code === 9 || code === 10 || code === 13 || (code >= 32 && code <= 126)
+      );
+    }).length;
+    const printableRatio = decoded.length ? printableCount / decoded.length : 0;
+
+    // If content looks binary (e.g., raw PDF), keep original and let other sources handle text.
+    if (printableRatio < 0.8) {
+      return raw;
+    }
+    return decoded;
+  } catch {
+    return raw;
+  }
+};
+
+const extractTextFromBillTextPayload = (textPayload) => {
+  if (!textPayload || typeof textPayload !== "object") return "";
+
+  const candidates = [
+    textPayload.text,
+    textPayload.content,
+    textPayload.doc,
+    textPayload.document,
+    textPayload.bill_text,
+    textPayload.body,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !candidate.trim()) continue;
+    const decoded = decodeBase64IfLikely(candidate);
+    const normalized =
+      decoded.includes("<") && decoded.includes(">")
+        ? stripHtml(decoded)
+        : decoded.replace(/\s+/g, " ").trim();
+
+    if (normalized.length > 120) {
+      return normalized;
+    }
+  }
+
+  return "";
+};
+
 /**
  * Fetch a direct PDF/text link for a bill.
  * Uses getBill to enumerate text versions, then getBillText for the newest
@@ -101,6 +170,47 @@ export async function fetchBillPDFLink(legiscanBillId) {
     pdfLink: fallbackTextLink || bill.state_link || bill.url || null,
     sponsorNames,
   };
+}
+
+/**
+ * Fetch bill text content (for AI summarization context).
+ * Uses getBill -> getBillText and returns the newest useful text body.
+ */
+export async function fetchBillTextForAI(legiscanBillId) {
+  if (!legiscanBillId) return "";
+
+  const data = await legiscanRequest("getBill", { id: legiscanBillId });
+  const bill = data.bill || {};
+  const texts = Array.isArray(bill.texts) ? [...bill.texts] : [];
+
+  texts.sort((a, b) => {
+    const dateA = new Date(a?.date || 0).getTime() || 0;
+    const dateB = new Date(b?.date || 0).getTime() || 0;
+    return dateB - dateA;
+  });
+
+  for (const textItem of texts) {
+    const docId = textItem?.doc_id || textItem?.text_id || textItem?.id;
+    if (!docId) continue;
+
+    try {
+      const textResponse = await legiscanRequest("getBillText", { id: docId });
+      const extracted = extractTextFromBillTextPayload(textResponse?.text);
+      if (extracted) {
+        return extracted.slice(0, 30000);
+      }
+    } catch (error) {
+      console.warn(`getBillText failed for AI context doc ${docId}:`, error);
+    }
+  }
+
+  // Fallbacks if text payload is unavailable
+  const fallback = [bill.title, bill.description, bill.status_desc]
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+
+  return fallback;
 }
 
 /**
