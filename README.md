@@ -9,6 +9,10 @@ This project tracks Georgia legislative bills using the LegiScan API.
 3. Create `.env` and add:
    ```
    VITE_LEGISCAN_API_KEY=your_api_key_here
+   VITE_OPENAI_API_KEY=your_openai_api_key_here
+   # Optional overrides
+   # VITE_OPENAI_MODEL=gpt-4o-mini
+   # VITE_OPENAI_BASE_URL=https://api.openai.com/v1
    ```
 4. Start dev server: `npm run dev`
 

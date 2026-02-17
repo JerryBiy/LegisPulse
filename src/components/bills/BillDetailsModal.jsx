@@ -28,6 +28,19 @@ const isLikelyPdfUrl = (url) => {
   return String(url).toLowerCase().includes(".pdf");
 };
 
+const asSafeText = (value) => {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+};
+
 const getStatusColor = (status) => {
   const colors = {
     introduced: "bg-blue-100 text-blue-800 border-blue-200",
@@ -55,6 +68,7 @@ export default function BillDetailsModal({
 }) {
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [generatedSummary, setGeneratedSummary] = useState(null);
+  const [aiError, setAiError] = useState("");
   const [pdfLink, setPdfLink] = useState(null);
   const [pdfStatus, setPdfStatus] = useState("idle");
   const [resolvedSponsors, setResolvedSponsors] = useState([]);
@@ -175,9 +189,12 @@ export default function BillDetailsModal({
       ? resolvedSponsors
       : [bill.sponsor, ...(bill.co_sponsors || [])].filter(Boolean);
   const sponsorsText = allSponsors.length ? allSponsors.join(", ") : "Unknown";
+  const safeBillSummary = asSafeText(bill.summary);
+  const safeBillChanges = asSafeText(bill.changes_analysis);
 
   const generateAISummary = async () => {
     setIsGeneratingSummary(true);
+    setAiError("");
     try {
       const ocgaSections =
         bill.ocga_sections_affected?.join(", ") || "various sections";
@@ -206,9 +223,40 @@ Keep the language accessible and explain any legal terms. Focus on real-world im
         },
       });
 
-      setGeneratedSummary(response);
+      const normalizedSummary = {
+        plain_language_summary: asSafeText(response?.plain_language_summary),
+        law_changes: asSafeText(response?.law_changes),
+        affected_parties: asSafeText(response?.affected_parties),
+        practical_impact: asSafeText(response?.practical_impact),
+      };
+
+      setGeneratedSummary(normalizedSummary);
+
+      if (bill?.id) {
+        const summaryText = normalizedSummary.plain_language_summary;
+        const changesText = [
+          normalizedSummary.law_changes,
+          normalizedSummary.affected_parties,
+          normalizedSummary.practical_impact,
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+
+        const updatedBill = await base44.entities.Bill.update(bill.id, {
+          summary: summaryText,
+          changes_analysis: changesText,
+        });
+
+        if (onBillUpdate && updatedBill) {
+          onBillUpdate(updatedBill);
+        }
+      }
     } catch (error) {
       console.error("Error generating AI summary:", error);
+      setAiError(
+        error?.message ||
+          "Failed to generate summary. Check your AI API key and try again.",
+      );
     }
     setIsGeneratingSummary(false);
   };
@@ -387,15 +435,18 @@ Keep the language accessible and explain any legal terms. Focus on real-world im
               </div>
             </CardHeader>
             <CardContent>
-              {bill.summary ? (
+              {aiError && (
+                <p className="text-sm text-red-600 mb-4">{aiError}</p>
+              )}
+              {safeBillSummary ? (
                 <div className="prose prose-slate max-w-none">
-                  <p>{bill.summary}</p>
-                  {bill.changes_analysis && (
+                  <p>{safeBillSummary}</p>
+                  {safeBillChanges && (
                     <div className="mt-4 p-4 bg-blue-50 rounded-lg">
                       <h4 className="font-semibold text-blue-900 mb-2">
                         Changes Analysis:
                       </h4>
-                      <p className="text-blue-800">{bill.changes_analysis}</p>
+                      <p className="text-blue-800">{safeBillChanges}</p>
                     </div>
                   )}
                 </div>

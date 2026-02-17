@@ -3,6 +3,10 @@
 
 const storage = typeof window === "undefined" ? null : window.localStorage;
 const STORE_KEY = "legistrack_data";
+const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
+const OPENAI_MODEL = import.meta.env.VITE_OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_BASE_URL =
+  import.meta.env.VITE_OPENAI_BASE_URL || "https://api.openai.com/v1";
 
 let memoryData = {
   bills: [],
@@ -67,6 +71,35 @@ const sortByField = (items, sortKey) => {
     if (av === bv) return 0;
     return av > bv ? direction : -direction;
   });
+};
+
+const extractJsonObject = (text) => {
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Try extracting fenced JSON first
+    const fencedMatch = text.match(/```json\s*([\s\S]*?)\s*```/i);
+    if (fencedMatch?.[1]) {
+      try {
+        return JSON.parse(fencedMatch[1]);
+      } catch {
+        // continue
+      }
+    }
+
+    // Fallback: first object-like block
+    const objectMatch = text.match(/\{[\s\S]*\}/);
+    if (objectMatch?.[0]) {
+      try {
+        return JSON.parse(objectMatch[0]);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
 };
 
 export const api = {
@@ -224,12 +257,57 @@ export const api = {
   integrations: {
     Core: {
       async InvokeLLM(params) {
-        // Placeholder for LLM integration
-        await delay(500);
-        console.log("LLM invoked with params:", params);
+        await delay();
+
+        if (!OPENAI_API_KEY) {
+          throw new Error(
+            "AI is not configured. Add VITE_OPENAI_API_KEY to your .env file.",
+          );
+        }
+
+        const expectsJson = Boolean(params?.response_json_schema);
+        const systemPrompt = expectsJson
+          ? "You are a helpful policy analysis assistant. Return ONLY valid JSON matching the requested schema. Do not include markdown fences or extra commentary."
+          : "You are a helpful policy analysis assistant.";
+
+        const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: OPENAI_MODEL,
+            temperature: params?.temperature ?? 0.2,
+            response_format: expectsJson ? { type: "json_object" } : undefined,
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: params?.prompt || "" },
+            ],
+          }),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(
+            `LLM request failed (${response.status}): ${errorText.slice(0, 300)}`,
+          );
+        }
+
+        const data = await response.json();
+        const content = data?.choices?.[0]?.message?.content || "";
+
+        if (expectsJson) {
+          const parsed = extractJsonObject(content);
+          if (!parsed || typeof parsed !== "object") {
+            throw new Error("LLM returned an invalid JSON response.");
+          }
+          return parsed;
+        }
+
         return {
-          status: "success",
-          message: "LLM processing would happen here",
+          text: content,
+          usage: data?.usage,
         };
       },
     },
