@@ -310,6 +310,30 @@ export default function BillDetailsModal({
     - Maintain accuracy and track closely to the bill text.
     - Be detailed but concise.`;
 
+      console.groupCollapsed(
+        `[AI Debug] Generate Summary payload for ${bill.bill_number}`,
+      );
+      console.log("Bill ID", bill.id);
+      console.log("LegiScan ID", bill.legiscan_id);
+      console.log("OCGA sections", ocgaSections);
+      console.log("Bill text context length", aiContext.length);
+      console.log("Bill text preview (start)", aiContext.slice(0, 1200));
+      console.log(
+        "Bill text preview (end)",
+        aiContext.length > 1200 ? aiContext.slice(-1200) : aiContext,
+      );
+      console.log(
+        "Bill text context truncated to 30000",
+        billTextContext.length > 30000,
+      );
+      console.log("Prompt length", prompt.length);
+      console.log("Prompt preview (start)", prompt.slice(0, 2000));
+      console.log(
+        "Prompt preview (end)",
+        prompt.length > 2000 ? prompt.slice(-2000) : prompt,
+      );
+      console.groupEnd();
+
       const response = await api.integrations.Core.InvokeLLM({
         prompt,
         response_json_schema: {

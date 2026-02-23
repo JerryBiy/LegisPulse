@@ -4,7 +4,7 @@
 const storage = typeof window === "undefined" ? null : window.localStorage;
 const STORE_KEY = "legistrack_data";
 const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
-const OPENAI_MODEL = import.meta.env.VITE_OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_MODEL = import.meta.env.VITE_OPENAI_MODEL || "gpt-5.2";
 const OPENAI_BASE_URL =
   import.meta.env.VITE_OPENAI_BASE_URL || "https://api.openai.com/v1";
 
@@ -269,6 +269,37 @@ export const api = {
         const systemPrompt = expectsJson
           ? "You are a helpful policy analysis assistant. Return ONLY valid JSON matching the requested schema. Do not include markdown fences or extra commentary."
           : "You are a helpful policy analysis assistant.";
+
+        console.groupCollapsed("[AI Debug] Outgoing OpenAI request");
+        console.log("Model", OPENAI_MODEL);
+        console.log("Base URL", OPENAI_BASE_URL);
+        console.log("Temperature", params?.temperature ?? 0.2);
+        console.log("Expects JSON", expectsJson);
+        console.log(
+          "User prompt length",
+          typeof params?.prompt === "string" ? params.prompt.length : 0,
+        );
+        console.log(
+          "User prompt preview (start)",
+          typeof params?.prompt === "string"
+            ? params.prompt.slice(0, 2000)
+            : "",
+        );
+        console.log(
+          "User prompt preview (end)",
+          typeof params?.prompt === "string"
+            ? params.prompt.length > 2000
+              ? params.prompt.slice(-2000)
+              : params.prompt
+            : "",
+        );
+        console.log(
+          "User prompt likely truncated before send",
+          typeof params?.prompt === "string"
+            ? params.prompt.length > 30000
+            : false,
+        );
+        console.groupEnd();
 
         const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
           method: "POST",

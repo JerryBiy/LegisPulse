@@ -52,61 +52,227 @@ const stripHtml = (value) =>
     .replace(/\s+/g, " ")
     .trim();
 
+const normalizeWhitespace = (value) =>
+  String(value || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\t/g, " ")
+    .replace(/\u00a0/g, " ")
+    .replace(/[ ]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+const buildBillTextCandidates = (textPayload) => {
+  const candidates = [];
+
+  if (typeof textPayload === "string") {
+    candidates.push(textPayload);
+  }
+
+  if (typeof textPayload === "object" && textPayload) {
+    candidates.push(
+      textPayload.text,
+      textPayload.content,
+      textPayload.doc,
+      textPayload.document,
+      textPayload.bill_text,
+      textPayload.body,
+      textPayload.full_text,
+    );
+  }
+
+  return candidates;
+};
+
+const decodeBase64ToBinary = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw || typeof atob !== "function") return "";
+
+  const base64Like = /^[A-Za-z0-9+/=\r\n]+$/.test(raw) && raw.length % 4 === 0;
+  if (!base64Like) return "";
+
+  try {
+    return atob(raw);
+  } catch {
+    return "";
+  }
+};
+
+const binaryToBytes = (binary) =>
+  Uint8Array.from(binary, (char) => char.charCodeAt(0));
+
+const looksLikeReadableText = (text) => {
+  const normalized = normalizeWhitespace(text);
+  if (!normalized) return false;
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length < 40) return false;
+
+  // Must look like natural language text.
+  const hasSentencePunctuation = /[\.!?;:]/.test(normalized);
+  const hasNaturalSpacing = /\s/.test(normalized);
+  const hasReasonableLength = normalized.length >= 300;
+
+  return hasSentencePunctuation && hasNaturalSpacing && hasReasonableLength;
+};
+
 const decodeBase64IfLikely = (value) => {
   const raw = String(value || "").trim();
   if (!raw) return "";
 
-  const base64Like = /^[A-Za-z0-9+/=\r\n]+$/.test(raw) && raw.length % 4 === 0;
-  if (!base64Like || typeof atob !== "function") {
+  const binary = decodeBase64ToBinary(raw);
+  if (!binary) {
     return raw;
   }
 
   try {
-    const decoded = atob(raw);
-    const printableCount = decoded.split("").filter((char) => {
-      const code = char.charCodeAt(0);
-      return (
-        code === 9 || code === 10 || code === 13 || (code >= 32 && code <= 126)
-      );
-    }).length;
-    const printableRatio = decoded.length ? printableCount / decoded.length : 0;
-
-    // If content looks binary (e.g., raw PDF), keep original and let other sources handle text.
-    if (printableRatio < 0.8) {
-      return raw;
+    // Detect PDF binary signature and reject as plain text source.
+    if (binary.startsWith("%PDF-")) {
+      return "";
     }
-    return decoded;
+
+    const bytes = binaryToBytes(binary);
+    let decoded = "";
+
+    try {
+      decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    } catch {
+      decoded = binary;
+    }
+
+    const normalized = normalizeWhitespace(decoded);
+
+    // Prefer UTF-8 decoded text, but if it looks partially corrupted,
+    // try the raw decoded binary string as a fallback.
+    const replacementCharRatio = normalized.length
+      ? (normalized.match(/�/g)?.length || 0) / normalized.length
+      : 0;
+    if (replacementCharRatio > 0.05) {
+      const binaryFallback = normalizeWhitespace(binary);
+      return binaryFallback;
+    }
+
+    return normalized;
   } catch {
     return raw;
   }
 };
 
-const extractTextFromBillTextPayload = (textPayload) => {
-  if (!textPayload || typeof textPayload !== "object") return "";
+const extractPdfBytesFromBillTextPayload = (textPayload) => {
+  const candidates = buildBillTextCandidates(textPayload);
 
-  const candidates = [
-    textPayload.text,
-    textPayload.content,
-    textPayload.doc,
-    textPayload.document,
-    textPayload.bill_text,
-    textPayload.body,
-  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !candidate.trim()) continue;
+    const binary = decodeBase64ToBinary(candidate);
+    if (!binary) continue;
+    if (!binary.startsWith("%PDF-")) continue;
+    return binaryToBytes(binary);
+  }
+
+  return null;
+};
+
+const extractTextFromBillTextPayload = (textPayload) => {
+  if (!textPayload) return "";
+
+  const candidates = buildBillTextCandidates(textPayload);
+
+  let bestText = "";
 
   for (const candidate of candidates) {
     if (typeof candidate !== "string" || !candidate.trim()) continue;
     const decoded = decodeBase64IfLikely(candidate);
+    if (!decoded) continue;
+
     const normalized =
       decoded.includes("<") && decoded.includes(">")
-        ? stripHtml(decoded)
-        : decoded.replace(/\s+/g, " ").trim();
+        ? normalizeWhitespace(stripHtml(decoded))
+        : normalizeWhitespace(decoded);
 
-    if (normalized.length > 120) {
-      return normalized;
+    if (!normalized) continue;
+
+    if (
+      normalized.length > bestText.length &&
+      looksLikeReadableText(normalized)
+    ) {
+      bestText = normalized;
     }
   }
 
-  return "";
+  // Secondary fallback: if no strong candidate matched the heuristic,
+  // accept the longest non-empty normalized candidate.
+  if (!bestText) {
+    for (const candidate of candidates) {
+      if (typeof candidate !== "string" || !candidate.trim()) continue;
+      const decoded = decodeBase64IfLikely(candidate);
+      if (!decoded) continue;
+
+      const normalized =
+        decoded.includes("<") && decoded.includes(">")
+          ? normalizeWhitespace(stripHtml(decoded))
+          : normalizeWhitespace(decoded);
+
+      if (normalized.length > bestText.length) {
+        bestText = normalized;
+      }
+    }
+  }
+
+  return bestText;
+};
+
+const extractTextFromPdfBytes = async (pdfData) => {
+  if (!pdfData?.length) return "";
+
+  try {
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const pdfWorker = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
+
+    if (pdfjs.GlobalWorkerOptions?.workerSrc !== pdfWorker.default) {
+      pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker.default;
+    }
+
+    const loadingTask = pdfjs.getDocument({
+      data: pdfData,
+      isEvalSupported: false,
+    });
+
+    const pdfDocument = await loadingTask.promise;
+    const maxPages = Math.min(pdfDocument.numPages || 0, 60);
+    const pageTexts = [];
+
+    for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
+      const page = await pdfDocument.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const text = content.items
+        .map((item) =>
+          "str" in item && typeof item.str === "string" ? item.str : "",
+        )
+        .filter(Boolean)
+        .join(" ");
+
+      if (text) pageTexts.push(text);
+    }
+
+    const extracted = normalizeWhitespace(pageTexts.join("\n"));
+    return extracted;
+  } catch (error) {
+    console.warn("Unable to extract PDF text for AI context", error);
+    return "";
+  }
+};
+
+const extractTextFromPdfUrl = async (pdfUrl) => {
+  if (!pdfUrl) return "";
+
+  try {
+    const response = await fetch(pdfUrl);
+    if (!response.ok) return "";
+    const pdfData = new Uint8Array(await response.arrayBuffer());
+    return await extractTextFromPdfBytes(pdfData);
+  } catch (error) {
+    console.warn("Unable to fetch PDF URL for AI context", error);
+    return "";
+  }
 };
 
 /**
@@ -189,6 +355,8 @@ export async function fetchBillTextForAI(legiscanBillId) {
     return dateB - dateA;
   });
 
+  let bestExtractedText = "";
+
   for (const textItem of texts) {
     const docId = textItem?.doc_id || textItem?.text_id || textItem?.id;
     if (!docId) continue;
@@ -196,16 +364,53 @@ export async function fetchBillTextForAI(legiscanBillId) {
     try {
       const textResponse = await legiscanRequest("getBillText", { id: docId });
       const extracted = extractTextFromBillTextPayload(textResponse?.text);
-      if (extracted) {
-        return extracted.slice(0, 30000);
+      if (extracted && extracted.length > bestExtractedText.length) {
+        bestExtractedText = extracted;
+
+        // Early return once we have a strong candidate to reduce extra API calls.
+        if (bestExtractedText.length >= 12000) {
+          return bestExtractedText.slice(0, 30000);
+        }
+      }
+
+      if (bestExtractedText.length < 300) {
+        const pdfBytes = extractPdfBytesFromBillTextPayload(textResponse?.text);
+        if (pdfBytes?.length) {
+          const pdfText = await extractTextFromPdfBytes(pdfBytes);
+          if (pdfText && pdfText.length > bestExtractedText.length) {
+            bestExtractedText = pdfText;
+
+            if (bestExtractedText.length >= 12000) {
+              return bestExtractedText.slice(0, 30000);
+            }
+          }
+        }
       }
     } catch (error) {
       console.warn(`getBillText failed for AI context doc ${docId}:`, error);
     }
   }
 
-  // No bill text available from getBillText payloads.
-  return "";
+  if (bestExtractedText.length < 300) {
+    try {
+      const { pdfLink } = await fetchBillPDFLink(legiscanBillId);
+      if (isLikelyPdfUrl(pdfLink)) {
+        const pdfText = await extractTextFromPdfUrl(pdfLink);
+        if (pdfText && pdfText.length > bestExtractedText.length) {
+          bestExtractedText = pdfText;
+        }
+      }
+    } catch (error) {
+      console.warn("PDF fallback failed for AI context", error);
+    }
+  }
+
+  // Require sufficient text to avoid very short or metadata-only summaries.
+  if (bestExtractedText.length < 300) {
+    return "";
+  }
+
+  return bestExtractedText.slice(0, 30000);
 }
 
 /**
