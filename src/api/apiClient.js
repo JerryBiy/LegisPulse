@@ -332,6 +332,29 @@ export const api = {
         const { data: sessionData } = await supabase.auth.getSession();
         const email = sessionData?.session?.user?.email ?? "";
 
+        // Check for pending invites FIRST — before creating anything
+        // Use RPC to bypass RLS (security definer function)
+        const { data: pending, error: pendingErr } = await supabase.rpc(
+          "get_my_pending_invites",
+        );
+        if (pendingErr)
+          console.error("[Team] get_my_pending_invites error:", pendingErr);
+        if (pending && pending.length > 0) {
+          return { __pendingInvite: true };
+        }
+
+        // Check if user is an active MEMBER of someone else's team (invited)
+        // This takes priority over ownership so invited users see the shared team
+        const { data: membership, error: memberErr } = await supabase
+          .from("team_members")
+          .select("team_id, teams(*)")
+          .eq("user_id", userId)
+          .eq("status", "active")
+          .eq("role", "member")
+          .maybeSingle();
+        if (memberErr) throw memberErr;
+        if (membership?.teams) return membership.teams;
+
         // Check if user owns a team
         const { data: owned, error: ownedErr } = await supabase
           .from("teams")
@@ -340,16 +363,6 @@ export const api = {
           .maybeSingle();
         if (ownedErr) throw ownedErr;
         if (owned) return owned;
-
-        // Check if user is an active member of another team
-        const { data: membership, error: memberErr } = await supabase
-          .from("team_members")
-          .select("team_id, teams(*)")
-          .eq("user_id", userId)
-          .eq("status", "active")
-          .maybeSingle();
-        if (memberErr) throw memberErr;
-        if (membership?.teams) return membership.teams;
 
         // Auto-create a new team
         const firstName = email.split("@")[0] || "My";
@@ -372,15 +385,22 @@ export const api = {
       },
 
       async acceptPendingInvites() {
-        const userId = await getUserId();
-        const { data: sessionData } = await supabase.auth.getSession();
-        const email = sessionData?.session?.user?.email;
-        if (!email) return;
-        await supabase
-          .from("team_members")
-          .update({ user_id: userId, status: "active" })
-          .eq("email", email)
-          .eq("status", "pending");
+        const { error } = await supabase.rpc("accept_my_team_invites");
+        if (error) throw error;
+      },
+
+      async getPendingInvites() {
+        const { data, error } = await supabase.rpc("get_my_pending_invites");
+        if (error) throw error;
+        // Normalize to match UI expectations: { id, teams: { name } }
+        return (data ?? []).map((r) => ({
+          id: r.id,
+          team_id: r.team_id,
+          email: r.invite_email,
+          role: r.role,
+          status: r.status,
+          teams: { name: r.team_name },
+        }));
       },
 
       async getMembers(teamId) {
@@ -410,10 +430,24 @@ export const api = {
       },
 
       async removeMember(memberId) {
-        const { error } = await supabase
-          .from("team_members")
-          .delete()
-          .eq("id", memberId);
+        // Use security definer RPC so owner can delete any member in their team
+        const { error } = await supabase.rpc("remove_team_member", {
+          member_id: memberId,
+        });
+        if (error) throw error;
+      },
+
+      async declineInvite(inviteId) {
+        const { error } = await supabase.rpc("decline_my_team_invite", {
+          invite_id: inviteId,
+        });
+        if (error) throw error;
+      },
+
+      async leaveTeam(teamId) {
+        const { error } = await supabase.rpc("leave_my_team", {
+          p_team_id: teamId,
+        });
         if (error) throw error;
       },
 

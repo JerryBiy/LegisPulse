@@ -27,7 +27,7 @@ export const AuthProvider = ({ children }) => {
     // Listen for auth state changes (sign in, sign out, token refresh)
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
       if (session?.user) {
         setUser(buildUser(session.user));
         setIsAuthenticated(true);

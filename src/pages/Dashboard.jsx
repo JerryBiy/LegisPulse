@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/apiClient";
 import { useAuth } from "@/lib/AuthContext";
@@ -13,9 +13,10 @@ import { useToast } from "@/components/ui/use-toast";
 export default function Dashboard() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const [filteredBills, setFilteredBills] = useState([]);
-  const [displayedBills, setDisplayedBills] = useState([]);
-  const [displayCount, setDisplayCount] = useState(10);
+  const [displayCount, setDisplayCount] = useState(() => {
+    const saved = sessionStorage.getItem("dashboard-display-count");
+    return saved ? Math.max(10, parseInt(saved, 10)) : 10;
+  });
   const [filters, setFilters] = useState({
     search: "",
     chamber: null,
@@ -152,7 +153,7 @@ export default function Dashboard() {
     return correctedBills;
   }, [rawBills]);
 
-  const applyFilters = useCallback(() => {
+  const filteredBills = useMemo(() => {
     let filtered = bills;
 
     if (filters.search) {
@@ -255,19 +256,23 @@ export default function Dashboard() {
       );
     }
 
-    setFilteredBills(filtered);
-  }, [bills, filters]); // Depend on bills and filters, so this function is memoized
+    return filtered;
+  }, [bills, filters]);
 
+  const displayedBills = useMemo(
+    () => filteredBills.slice(0, displayCount),
+    [filteredBills, displayCount],
+  );
+
+  // Persist display count across navigations
   useEffect(() => {
-    applyFilters();
-  }, [applyFilters]);
+    sessionStorage.setItem("dashboard-display-count", String(displayCount));
+  }, [displayCount]);
 
-  useEffect(() => {
-    setDisplayedBills(filteredBills.slice(0, displayCount));
-  }, [filteredBills, displayCount]);
-
+  // Infinite scroll + save scroll position
   useEffect(() => {
     const handleScroll = () => {
+      sessionStorage.setItem("dashboard-scroll-y", String(window.scrollY));
       if (
         window.innerHeight + window.scrollY >=
         document.documentElement.scrollHeight - 500
@@ -278,9 +283,22 @@ export default function Dashboard() {
       }
     };
 
-    window.addEventListener("scroll", handleScroll);
+    window.addEventListener("scroll", handleScroll, { passive: true });
     return () => window.removeEventListener("scroll", handleScroll);
   }, [displayCount, filteredBills.length]);
+
+  // Restore scroll position once bills are rendered
+  const scrollRestored = useRef(false);
+  useEffect(() => {
+    if (filteredBills.length === 0 || scrollRestored.current) return;
+    const saved = sessionStorage.getItem("dashboard-scroll-y");
+    if (saved) {
+      scrollRestored.current = true;
+      requestAnimationFrame(() => {
+        window.scrollTo(0, parseInt(saved, 10));
+      });
+    }
+  }, [filteredBills.length]);
 
   const getBillCounts = () => {
     return {
@@ -374,6 +392,7 @@ export default function Dashboard() {
             </p>
           </div>
           <BillSyncButton
+            autoSync={!isLoading && rawBills.length === 0}
             onSyncComplete={() =>
               queryClient.invalidateQueries({ queryKey: ["bills"] })
             }

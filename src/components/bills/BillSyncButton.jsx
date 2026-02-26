@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api } from "@/api/apiClient";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -6,7 +6,7 @@ import { RefreshCw, Download, CheckCircle, AlertCircle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { fetchGABills, isLegiScanConfigured } from "@/services/legiscan";
 
-export default function BillSyncButton({ onSyncComplete }) {
+export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState(null);
   const [progress, setProgress] = useState({
@@ -14,6 +14,7 @@ export default function BillSyncButton({ onSyncComplete }) {
     total: 0,
     newBills: 0,
   });
+  const autoSyncFired = useRef(false);
 
   const syncBillsFromWebsite = async () => {
     setIsSyncing(true);
@@ -75,6 +76,14 @@ export default function BillSyncButton({ onSyncComplete }) {
 
     setIsSyncing(false);
   };
+
+  useEffect(() => {
+    if (autoSync && !autoSyncFired.current && !isSyncing) {
+      autoSyncFired.current = true;
+      syncBillsFromWebsite();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSync]);
 
   return (
     <div className="space-y-3">

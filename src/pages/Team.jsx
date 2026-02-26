@@ -2,7 +2,17 @@ import React, { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/apiClient";
 import { useAuth } from "@/lib/AuthContext";
-import { Users, UserPlus, Trash2, Star, Mail } from "lucide-react";
+import {
+  Users,
+  UserPlus,
+  Trash2,
+  Star,
+  Mail,
+  UserCheck,
+  CheckCircle,
+  XCircle,
+  LogOut,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -18,15 +28,58 @@ export default function Team() {
   const [selectedBill, setSelectedBill] = useState(null);
 
   // Load (or auto-create) the current user's team
-  const { data: team, isLoading: loadingTeam } = useQuery({
+  const {
+    data: team,
+    isLoading: loadingTeam,
+    refetch: refetchTeam,
+  } = useQuery({
     queryKey: ["team"],
-    queryFn: async () => {
-      await api.entities.Team.acceptPendingInvites().catch(() => {});
-      return api.entities.Team.getOrCreate();
-    },
+    queryFn: () => api.entities.Team.getOrCreate(),
     staleTime: 0,
     retry: 1,
   });
+
+  const hasPendingInvite = team?.__pendingInvite === true;
+
+  // Pending invites for this user (shown when hasPendingInvite)
+  const { data: pendingInvites = [], refetch: refetchPending } = useQuery({
+    queryKey: ["pendingInvites"],
+    queryFn: () => api.entities.Team.getPendingInvites(),
+    enabled: hasPendingInvite,
+    staleTime: 0,
+  });
+
+  const [isAccepting, setIsAccepting] = useState(false);
+  const [acceptError, setAcceptError] = useState("");
+
+  const handleAcceptInvite = async () => {
+    setIsAccepting(true);
+    setAcceptError("");
+    try {
+      await api.entities.Team.acceptPendingInvites();
+      // Force refetch team query — don't just invalidate, wait for fresh data
+      await queryClient.refetchQueries({ queryKey: ["team"] });
+      await queryClient.invalidateQueries({ queryKey: ["pendingInvites"] });
+    } catch (err) {
+      console.error("[Accept invite]", err);
+      setAcceptError(
+        err?.message ??
+          "Failed to accept invite. Make sure the RLS SQL has been run in Supabase.",
+      );
+    } finally {
+      setIsAccepting(false);
+    }
+  };
+
+  const handleDeclineInvite = async (invite) => {
+    try {
+      await api.entities.Team.declineInvite(invite.id);
+      await queryClient.refetchQueries({ queryKey: ["team"] });
+      await queryClient.invalidateQueries({ queryKey: ["pendingInvites"] });
+    } catch (err) {
+      console.error("[Decline invite]", err);
+    }
+  };
 
   const teamId = team?.id;
 
@@ -57,6 +110,19 @@ export default function Team() {
     teamBillNumbers.includes(b.bill_number),
   );
   const isOwner = team?.created_by === authUser?.id;
+
+  const handleLeaveTeam = async () => {
+    if (!window.confirm("Are you sure you want to leave this team?")) return;
+    try {
+      await api.entities.Team.leaveTeam(teamId);
+      await queryClient.refetchQueries({ queryKey: ["team"] });
+      queryClient.removeQueries({ queryKey: ["teamMembers", teamId] });
+      queryClient.removeQueries({ queryKey: ["teamBills", teamId] });
+    } catch (err) {
+      console.error("[Leave team]", err);
+      alert(err?.message ?? "Failed to leave team.");
+    }
+  };
 
   // ── Mutations ──────────────────────────────────────────────────────────────
 
@@ -104,6 +170,81 @@ export default function Team() {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="w-8 h-8 border-4 border-slate-200 border-t-blue-600 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  // ── Pending invite screen ──────────────────────────────────────────────────
+  if (hasPendingInvite) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+        <div className="max-w-md w-full space-y-4">
+          <div className="text-center space-y-2">
+            <div className="inline-flex p-4 bg-blue-100 rounded-full mb-2">
+              <UserCheck className="w-8 h-8 text-blue-600" />
+            </div>
+            <h1 className="text-2xl font-bold text-slate-900">
+              Team Invitation
+            </h1>
+            <p className="text-slate-600">
+              You've been invited to join a team.
+            </p>
+          </div>
+
+          {pendingInvites.map((invite) => (
+            <Card key={invite.id} className="border-blue-200">
+              <CardContent className="p-5 space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-blue-100 rounded-lg">
+                    <Users className="w-5 h-5 text-blue-600" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-slate-900">
+                      {invite.teams?.name ?? "A team"}
+                    </p>
+                    <p className="text-sm text-slate-500">
+                      You were invited as a member
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <Button
+                    className="flex-1 bg-blue-600 hover:bg-blue-700 gap-2"
+                    onClick={handleAcceptInvite}
+                    disabled={isAccepting}
+                  >
+                    {isAccepting ? (
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <CheckCircle className="w-4 h-4" />
+                    )}
+                    Accept & Join
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="flex-1 gap-2 text-red-600 border-red-200 hover:bg-red-50"
+                    onClick={() => handleDeclineInvite(invite)}
+                    disabled={isAccepting}
+                  >
+                    <XCircle className="w-4 h-4" />
+                    Decline
+                  </Button>
+                </div>
+                {acceptError && (
+                  <p className="text-sm text-red-600 mt-2">{acceptError}</p>
+                )}
+              </CardContent>
+            </Card>
+          ))}
+
+          {pendingInvites.length === 0 && (
+            <Card>
+              <CardContent className="p-5 text-center text-slate-500 text-sm">
+                Loading invitation details...
+              </CardContent>
+            </Card>
+          )}
+        </div>
       </div>
     );
   }
@@ -181,6 +322,20 @@ export default function Team() {
                 </p>
               )}
             </div>
+
+            {/* Leave team (members only) */}
+            {!isOwner && (
+              <div className="pt-3 border-t border-slate-200">
+                <Button
+                  variant="outline"
+                  className="gap-2 text-red-600 border-red-200 hover:bg-red-50"
+                  onClick={handleLeaveTeam}
+                >
+                  <LogOut className="w-4 h-4" />
+                  Leave Team
+                </Button>
+              </div>
+            )}
 
             {/* Invite form (owner only) */}
             {isOwner && (

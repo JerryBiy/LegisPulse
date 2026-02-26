@@ -2,6 +2,8 @@ import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import { createPageUrl } from "@/utils";
 import { useAuth } from "@/lib/AuthContext";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/api/apiClient";
 import {
   LayoutDashboard,
   Mail,
@@ -71,6 +73,19 @@ const navigationItems = [
 export default function Layout({ children, currentPageName }) {
   const location = useLocation();
   const { user, logout } = useAuth();
+
+  const { data: bills = [] } = useQuery({
+    queryKey: ["bills"],
+    queryFn: () => api.entities.Bill.list(),
+  });
+
+  const { data: userData } = useQuery({
+    queryKey: ["profile"],
+    queryFn: () => api.auth.me().catch(() => null),
+  });
+
+  const totalBills = bills.length;
+  const trackedCount = (userData?.tracked_bill_ids ?? []).length;
 
   return (
     <SidebarProvider>
@@ -144,11 +159,15 @@ export default function Layout({ children, currentPageName }) {
                   </div>
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-slate-600">Total Bills</span>
-                    <span className="font-bold text-slate-900">0</span>
+                    <span className="font-bold text-slate-900">
+                      {totalBills}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-slate-600">Tracked</span>
-                    <span className="font-bold text-blue-600">0</span>
+                    <span className="font-bold text-blue-600">
+                      {trackedCount}
+                    </span>
                   </div>
                 </div>
               </SidebarGroupContent>
