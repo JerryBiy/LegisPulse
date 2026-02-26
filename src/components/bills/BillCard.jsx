@@ -36,6 +36,53 @@ const getChamberIcon = (chamber) => {
   return chamber === "house" ? Building2 : Building2;
 };
 
+const PARTY_CONFIG = {
+  D: {
+    label: "Democrat",
+    dot: "bg-indigo-500",
+    pill: "bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200",
+  },
+  R: {
+    label: "Republican",
+    dot: "bg-rose-500",
+    pill: "bg-rose-50 text-rose-700 ring-1 ring-rose-200",
+  },
+  I: {
+    label: "Independent",
+    dot: "bg-slate-400",
+    pill: "bg-slate-50 text-slate-600 ring-1 ring-slate-200",
+  },
+  G: {
+    label: "Green",
+    dot: "bg-green-500",
+    pill: "bg-green-50 text-green-700 ring-1 ring-green-200",
+  },
+  L: {
+    label: "Libertarian",
+    dot: "bg-yellow-500",
+    pill: "bg-yellow-50 text-yellow-700 ring-1 ring-yellow-200",
+  },
+};
+
+const PartyBadge = ({ party }) => {
+  if (!party) return null;
+  const config = PARTY_CONFIG[party] ?? {
+    label: party,
+    dot: "bg-slate-400",
+    pill: "bg-slate-50 text-slate-600 ring-1 ring-slate-200",
+  };
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${config.pill}`}
+    >
+      <span
+        className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${config.dot}`}
+      />
+      {config.label}
+    </span>
+  );
+};
+
 export default function BillCard({
   bill,
   onViewDetails,
@@ -140,6 +187,7 @@ export default function BillCard({
 
         <div className="flex items-center gap-2 text-sm">
           <User className="w-4 h-4 text-slate-400" />
+          {bill.sponsor_party && <PartyBadge party={bill.sponsor_party} />}
           <span className="text-slate-600 font-medium break-all">
             {visibleSponsors}
             {isSponsorTruncated && (

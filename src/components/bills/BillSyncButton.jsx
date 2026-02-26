@@ -42,6 +42,7 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
           chamber: bill.chamber,
           bill_type: bill.bill_type,
           sponsor: bill.sponsor,
+          sponsor_party: bill.sponsor_party || null,
           sponsors: bill.sponsors || [],
           co_sponsors: bill.co_sponsors || [],
           session_year: bill.session_year,

@@ -25,6 +25,20 @@ const extractSponsorNames = (sponsors) => {
     .filter((name) => typeof name === "string" && name.trim().length > 0);
 };
 
+// Maps a LegiScan party abbreviation/id to a canonical short label ("D", "R", "I", …)
+const PARTY_ID_MAP = { 1: "R", 2: "D", 3: "I", 4: "G", 5: "L", 6: "NP" };
+const extractPrimaryParty = (sponsors) => {
+  if (!Array.isArray(sponsors) || sponsors.length === 0) return null;
+  const s = sponsors[0];
+  if (s?.party && typeof s.party === "string" && s.party.trim()) {
+    return s.party.trim().toUpperCase();
+  }
+  if (s?.party_id != null) {
+    return PARTY_ID_MAP[Number(s.party_id)] ?? null;
+  }
+  return null;
+};
+
 const extractBillNumberValue = (billNumber) => {
   const number = parseInt(
     String(billNumber || "").replace(/\D/g, "") || "0",
@@ -490,6 +504,11 @@ export async function fetchGABills(sessionId) {
       sponsor: Array.isArray(bill.sponsors)
         ? bill.sponsors[0]?.name
         : bill.sponsors?.name || "Unknown",
+      sponsor_party: extractPrimaryParty(bill.sponsors),
+      // Temporary: capture people_id for fast party lookup via getSessionPeople
+      _primarySponsorPeopleId: Array.isArray(bill.sponsors)
+        ? (bill.sponsors[0]?.people_id ?? null)
+        : (bill.sponsors?.people_id ?? null),
       sponsors: extractSponsorNames(bill.sponsors),
       co_sponsors: Array.isArray(bill.sponsors)
         ? bill.sponsors
@@ -505,8 +524,61 @@ export async function fetchGABills(sessionId) {
     });
   }
 
-  // Master list can be missing sponsor names for many bills.
-  // Enrich missing sponsors with getBill so cards do not show "Unknown" after sync.
+  // ── Party enrichment: one getSessionPeople call instead of one getBill per bill ──
+  // getSessionPeople returns all legislators for the session with their party data.
+  // We build a lookup map and apply party to every bill instantly.
+  try {
+    const peopleData = await legiscanRequest("getSessionPeople", {
+      id: sessionId,
+    });
+    const peopleList =
+      peopleData?.sessionpeople?.people || peopleData?.people || [];
+
+    // Build two lookup maps: by people_id (fast) and by normalized name (fallback)
+    const partyById = {};
+    const partyByName = {};
+    for (const person of peopleList) {
+      const party =
+        (typeof person.party === "string" &&
+          person.party.trim().toUpperCase()) ||
+        PARTY_ID_MAP[Number(person.party_id)] ||
+        null;
+      if (!party) continue;
+      if (person.people_id != null) partyById[String(person.people_id)] = party;
+      if (person.name) partyByName[person.name.trim().toLowerCase()] = party;
+    }
+
+    console.log(
+      `[LegiScan] Session people loaded: ${peopleList.length} legislators, applying party to ${bills.length} bills`,
+    );
+
+    for (const billRecord of bills) {
+      if (billRecord.sponsor_party) continue; // already set from master list
+
+      // Try people_id from the raw master list sponsor objects (stored in _primarySponsorPeopleId)
+      const pid = billRecord._primarySponsorPeopleId;
+      if (pid && partyById[String(pid)]) {
+        billRecord.sponsor_party = partyById[String(pid)];
+        continue;
+      }
+
+      // Fallback: match by sponsor name
+      const name = (billRecord.sponsor || "").trim().toLowerCase();
+      if (name && partyByName[name]) {
+        billRecord.sponsor_party = partyByName[name];
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "[LegiScan] getSessionPeople failed, skipping party lookup:",
+      err,
+    );
+  }
+
+  // Clean up temporary field
+  for (const b of bills) delete b._primarySponsorPeopleId;
+
+  // ── Sponsor-name enrichment: only for bills still missing a sponsor name ──
   const MAX_SPONSOR_ENRICHMENT = 200;
   const ENRICHMENT_CONCURRENCY = 8;
 
@@ -519,34 +591,40 @@ export async function fetchGABills(sessionId) {
     )
     .slice(0, MAX_SPONSOR_ENRICHMENT);
 
-  for (
-    let i = 0;
-    i < billsNeedingSponsors.length;
-    i += ENRICHMENT_CONCURRENCY
-  ) {
-    const chunk = billsNeedingSponsors.slice(i, i + ENRICHMENT_CONCURRENCY);
-
-    await Promise.allSettled(
-      chunk.map(async (billRecord) => {
-        try {
-          const detailData = await legiscanRequest("getBill", {
-            id: billRecord.legiscan_id,
-          });
-          const sponsorNames = extractSponsorNames(detailData.bill?.sponsors);
-
-          if (sponsorNames.length > 0) {
-            billRecord.sponsor = sponsorNames[0];
-            billRecord.sponsors = sponsorNames;
-            billRecord.co_sponsors = sponsorNames.slice(1);
-          }
-        } catch (error) {
-          console.warn(
-            `Failed sponsor enrichment for bill ${billRecord.legiscan_id}:`,
-            error,
-          );
-        }
-      }),
+  if (billsNeedingSponsors.length > 0) {
+    console.log(
+      `[LegiScan] Fetching sponsor names for ${billsNeedingSponsors.length} bills…`,
     );
+    for (
+      let i = 0;
+      i < billsNeedingSponsors.length;
+      i += ENRICHMENT_CONCURRENCY
+    ) {
+      const chunk = billsNeedingSponsors.slice(i, i + ENRICHMENT_CONCURRENCY);
+      await Promise.allSettled(
+        chunk.map(async (billRecord) => {
+          try {
+            const detailData = await legiscanRequest("getBill", {
+              id: billRecord.legiscan_id,
+            });
+            const rawSponsors = detailData.bill?.sponsors;
+            const sponsorNames = extractSponsorNames(rawSponsors);
+            if (sponsorNames.length > 0) {
+              billRecord.sponsor = sponsorNames[0];
+              billRecord.sponsor_party =
+                billRecord.sponsor_party || extractPrimaryParty(rawSponsors);
+              billRecord.sponsors = sponsorNames;
+              billRecord.co_sponsors = sponsorNames.slice(1);
+            }
+          } catch (error) {
+            console.warn(
+              `Failed sponsor enrichment for bill ${billRecord.legiscan_id}:`,
+              error,
+            );
+          }
+        }),
+      );
+    }
   }
 
   return bills;
@@ -570,6 +648,7 @@ export async function fetchBillDetails(billId) {
     chamber: bill.chamber || bill.body || determineChamber(billNumber),
     bill_type: determineBillType(billNumber),
     sponsor: bill.sponsors?.[0]?.name || "Unknown",
+    sponsor_party: extractPrimaryParty(bill.sponsors),
     sponsors: extractSponsorNames(bill.sponsors),
     co_sponsors: bill.sponsors?.slice(1).map((s) => s.name) || [],
     session_year: bill.session?.year_start || 2026,

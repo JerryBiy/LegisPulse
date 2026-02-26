@@ -56,6 +56,7 @@ create table if not exists public.bills (
   bill_type           text,
   chamber             text,
   sponsor             text,
+  sponsor_party       text,
   sponsors            jsonb,
   co_sponsors         jsonb,
   session_year        integer,
