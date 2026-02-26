@@ -1,42 +1,47 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/apiClient";
 import { Bell, Star } from "lucide-react";
 import BillCard from "../components/bills/BillCard";
 import BillDetailsModal from "../components/bills/BillDetailsModal";
 
 export default function TrackedBills() {
-  const [trackedBills, setTrackedBills] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [selectedBill, setSelectedBill] = useState(null);
-  const [trackedBillIds, setTrackedBillIds] = useState([]);
 
-  useEffect(() => {
-    loadTrackedBills();
-  }, []);
+  const { data: userData } = useQuery({
+    queryKey: ["profile"],
+    queryFn: () => api.auth.me().catch(() => null),
+  });
 
-  const loadTrackedBills = async () => {
-    setIsLoading(true);
-    try {
-      const userData = await api.auth.me();
-      const billIds = userData?.tracked_bill_ids || [];
-      setTrackedBillIds(billIds);
+  const { data: allBills = [], isLoading } = useQuery({
+    queryKey: ["bills"],
+    queryFn: () => api.entities.Bill.list(),
+  });
 
-      if (billIds.length > 0) {
-        const bills = await api.entities.Bill.list();
-        const filtered = bills.filter((bill) => billIds.includes(bill.id));
-        setTrackedBills(filtered);
-      }
-    } catch (error) {
-      console.error("Error loading tracked bills:", error);
-    }
-    setIsLoading(false);
-  };
+  const trackedBillIds = userData?.tracked_bill_ids ?? [];
+  const trackedBills = allBills.filter((bill) =>
+    trackedBillIds.includes(bill.id),
+  );
 
-  const handleToggleTracking = async (billId) => {
+  const trackMutation = useMutation({
+    mutationFn: (newIds) => api.auth.updateMe({ tracked_bill_ids: newIds }),
+    onMutate: async (newIds) => {
+      await queryClient.cancelQueries({ queryKey: ["profile"] });
+      const previous = queryClient.getQueryData(["profile"]);
+      queryClient.setQueryData(["profile"], (old) =>
+        old ? { ...old, tracked_bill_ids: newIds } : old,
+      );
+      return { previous };
+    },
+    onError: (_err, _newIds, context) => {
+      queryClient.setQueryData(["profile"], context.previous);
+    },
+  });
+
+  const handleToggleTracking = (billId) => {
     const newTrackedIds = trackedBillIds.filter((id) => id !== billId);
-    setTrackedBillIds(newTrackedIds);
-    setTrackedBills((prev) => prev.filter((bill) => bill.id !== billId));
-    await api.auth.updateMe({ tracked_bill_ids: newTrackedIds });
+    trackMutation.mutate(newTrackedIds);
   };
 
   return (

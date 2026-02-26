@@ -1,5 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/apiClient";
+import { useAuth } from "@/lib/AuthContext";
 import { FileText, Globe } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import BillCard from "../components/bills/BillCard";
@@ -8,7 +10,7 @@ import BillDetailsModal from "../components/bills/BillDetailsModal";
 import BillSyncButton from "../components/bills/BillSyncButton";
 
 export default function Dashboard() {
-  const [bills, setBills] = useState([]);
+  const queryClient = useQueryClient();
   const [filteredBills, setFilteredBills] = useState([]);
   const [displayedBills, setDisplayedBills] = useState([]);
   const [displayCount, setDisplayCount] = useState(10);
@@ -19,14 +21,35 @@ export default function Dashboard() {
     status: null,
     session_year: null,
   });
-  const [isLoading, setIsLoading] = useState(true);
   const [selectedBill, setSelectedBill] = useState(null);
-  const [user, setUser] = useState(null);
-  const [trackedBillIds, setTrackedBillIds] = useState([]);
+  const { user: authUser } = useAuth();
 
-  useEffect(() => {
-    loadData();
-  }, []);
+  const { data: rawBills = [], isLoading } = useQuery({
+    queryKey: ["bills"],
+    queryFn: () => api.entities.Bill.list(),
+  });
+
+  const { data: userData } = useQuery({
+    queryKey: ["profile"],
+    queryFn: () => api.auth.me().catch(() => null),
+  });
+
+  const trackedBillIds = userData?.tracked_bill_ids ?? [];
+
+  const trackMutation = useMutation({
+    mutationFn: (newIds) => api.auth.updateMe({ tracked_bill_ids: newIds }),
+    onMutate: async (newIds) => {
+      await queryClient.cancelQueries({ queryKey: ["profile"] });
+      const previous = queryClient.getQueryData(["profile"]);
+      queryClient.setQueryData(["profile"], (old) =>
+        old ? { ...old, tracked_bill_ids: newIds } : old,
+      );
+      return { previous };
+    },
+    onError: (_err, _newIds, context) => {
+      queryClient.setQueryData(["profile"], context.previous);
+    },
+  });
 
   const fixBillTypes = (bills) => {
     // Determine bill type from bill number
@@ -46,37 +69,21 @@ export default function Dashboard() {
     });
   };
 
-  const loadData = async () => {
-    setIsLoading(true);
-    try {
-      const [billsData, userData] = await Promise.all([
-        api.entities.Bill.list(),
-        api.auth.me().catch(() => null),
-      ]);
-      // Fix any incorrect bill types
-      const correctedBills = fixBillTypes(billsData);
-
-      // Sort by highest bill number first (descending order)
-      correctedBills.sort((a, b) => {
-        const numA = parseInt(
-          String(a.bill_number).replace(/\D/g, "") || "0",
-          10,
-        );
-        const numB = parseInt(
-          String(b.bill_number).replace(/\D/g, "") || "0",
-          10,
-        );
-        return numB - numA;
-      });
-
-      setBills(correctedBills);
-      setUser(userData);
-      setTrackedBillIds(userData?.tracked_bill_ids || []);
-    } catch (error) {
-      console.error("Error loading data:", error);
-    }
-    setIsLoading(false);
-  };
+  const bills = useMemo(() => {
+    const correctedBills = fixBillTypes(rawBills);
+    correctedBills.sort((a, b) => {
+      const numA = parseInt(
+        String(a.bill_number).replace(/\D/g, "") || "0",
+        10,
+      );
+      const numB = parseInt(
+        String(b.bill_number).replace(/\D/g, "") || "0",
+        10,
+      );
+      return numB - numA;
+    });
+    return correctedBills;
+  }, [rawBills]);
 
   const applyFilters = useCallback(() => {
     let filtered = bills;
@@ -217,17 +224,12 @@ export default function Dashboard() {
   };
 
   const handleToggleTracking = async (billId, billNumber) => {
-    if (!user) return;
-
+    if (!authUser) return;
     const isCurrentlyTracked = trackedBillIds.includes(billId);
     const newTrackedIds = isCurrentlyTracked
       ? trackedBillIds.filter((id) => id !== billId)
       : [...trackedBillIds, billId];
-
-    setTrackedBillIds(newTrackedIds);
-    await api.auth.updateMe({ tracked_bill_ids: newTrackedIds });
-
-    // Monitor tracked bill on Twitter
+    trackMutation.mutate(newTrackedIds);
     if (!isCurrentlyTracked) {
       monitorBillOnTwitter(billNumber);
     }
@@ -262,7 +264,7 @@ export default function Dashboard() {
         if (response.has_updates && response.updates?.length > 0) {
           // Create notification for user
           await api.entities.Notification.create({
-            user_id: user.id,
+            user_id: authUser?.id,
             notification_type: "bill_mention",
             title: `${billNumber} mentioned on Twitter`,
             message: response.updates[0].content,
@@ -276,18 +278,19 @@ export default function Dashboard() {
     }
   };
 
-  const handleBillUpdate = useCallback((updatedBill) => {
-    if (!updatedBill?.id) return;
-
-    setBills((prev) =>
-      prev.map((bill) => (bill.id === updatedBill.id ? updatedBill : bill)),
-    );
-
-    setSelectedBill((prev) => {
-      if (!prev || prev.id !== updatedBill.id) return prev;
-      return { ...prev, ...updatedBill };
-    });
-  }, []);
+  const handleBillUpdate = useCallback(
+    (updatedBill) => {
+      if (!updatedBill?.id) return;
+      queryClient.setQueryData(["bills"], (old) =>
+        old ? old.map((b) => (b.id === updatedBill.id ? updatedBill : b)) : old,
+      );
+      setSelectedBill((prev) => {
+        if (!prev || prev.id !== updatedBill.id) return prev;
+        return { ...prev, ...updatedBill };
+      });
+    },
+    [queryClient],
+  );
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -303,7 +306,11 @@ export default function Dashboard() {
               Live bills from legis.ga.gov - 2025-2026 session
             </p>
           </div>
-          <BillSyncButton onSyncComplete={loadData} />
+          <BillSyncButton
+            onSyncComplete={() =>
+              queryClient.invalidateQueries({ queryKey: ["bills"] })
+            }
+          />
         </div>
 
         {/* Filters */}

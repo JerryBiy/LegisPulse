@@ -1,5 +1,5 @@
 import React, { createContext, useState, useContext, useEffect } from "react";
-import { api } from "@/api/apiClient";
+import { supabase } from "@/lib/supabase";
 
 const AuthContext = createContext(null);
 
@@ -7,48 +7,104 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
-  const [isLoadingPublicSettings, setIsLoadingPublicSettings] = useState(false);
   const [authError, setAuthError] = useState(null);
-  const [appPublicSettings, setAppPublicSettings] = useState(null); // Mock placeholder
 
   useEffect(() => {
-    checkUserAuth();
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setUser(buildUser(session.user));
+        setIsAuthenticated(true);
+      }
+      setIsLoadingAuth(false);
+    });
+
+    // Listen for auth state changes (sign in, sign out, token refresh)
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) {
+        setUser(buildUser(session.user));
+        setIsAuthenticated(true);
+        setAuthError(null);
+      } else {
+        setUser(null);
+        setIsAuthenticated(false);
+      }
+      setIsLoadingAuth(false);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
-  const checkUserAuth = async () => {
-    try {
-      // Now check if the user is authenticated
-      setIsLoadingAuth(true);
-      const currentUser = await api.auth.me();
-      setUser(currentUser);
-      setIsAuthenticated(true);
-      setIsLoadingAuth(false);
-    } catch (error) {
-      console.error("User auth check failed:", error);
-      setIsLoadingAuth(false);
-      setIsAuthenticated(false);
+  const buildUser = (supabaseUser) => ({
+    id: supabaseUser.id,
+    email: supabaseUser.email,
+    name:
+      supabaseUser.user_metadata?.name ||
+      supabaseUser.email?.split("@")[0] ||
+      "User",
+    tracked_bill_ids: [],
+  });
 
-      setAuthError({
-        type: "auth_required",
-        message: "Authentication required (mock user)",
-      });
+  const login = async (email, password) => {
+    setIsLoadingAuth(true);
+    setAuthError(null);
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    setIsLoadingAuth(false);
+    if (error) {
+      setAuthError({ type: "login_failed", message: error.message });
+      throw error;
     }
+    return data;
   };
 
-  const logout = (shouldRedirect = true) => {
+  const register = async (name, email, password) => {
+    setIsLoadingAuth(true);
+    setAuthError(null);
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { name } },
+    });
+    setIsLoadingAuth(false);
+    if (error) {
+      setAuthError({ type: "register_failed", message: error.message });
+      throw error;
+    }
+    return data;
+  };
+
+  const logout = async () => {
+    await supabase.auth.signOut();
     setUser(null);
     setIsAuthenticated(false);
-
-    api.auth.logout();
-    if (shouldRedirect && typeof window !== "undefined") {
-      window.location.href = "/";
+    if (typeof window !== "undefined") {
+      window.location.href = "/login";
     }
   };
 
   const navigateToLogin = () => {
     if (typeof window !== "undefined") {
-      window.location.href = "/";
+      window.location.href = "/login";
     }
+  };
+
+  // Legacy compat: kept so existing code still works
+  const checkUserAuth = async () => {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (session?.user) {
+      setUser(buildUser(session.user));
+      setIsAuthenticated(true);
+    } else {
+      setIsAuthenticated(false);
+    }
+    setIsLoadingAuth(false);
   };
 
   return (
@@ -57,9 +113,11 @@ export const AuthProvider = ({ children }) => {
         user,
         isAuthenticated,
         isLoadingAuth,
-        isLoadingPublicSettings,
+        isLoadingPublicSettings: false,
         authError,
-        appPublicSettings,
+        appPublicSettings: null,
+        login,
+        register,
         logout,
         navigateToLogin,
         checkUserAuth,

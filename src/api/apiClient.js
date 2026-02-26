@@ -1,65 +1,24 @@
 // API client for LegisTrack
-// Handles local bill storage and connects to external APIs (LegiScan, LLM services, etc.)
+// Data layer backed by Supabase (PostgreSQL + Auth).
+// Keeps the same public interface so existing components need no changes.
 
-const storage = typeof window === "undefined" ? null : window.localStorage;
-const STORE_KEY = "legistrack_data";
+import { supabase } from "@/lib/supabase";
+
 const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
-const OPENAI_MODEL = import.meta.env.VITE_OPENAI_MODEL || "gpt-5.2";
+const OPENAI_MODEL = import.meta.env.VITE_OPENAI_MODEL || "gpt-4o";
 const OPENAI_BASE_URL =
   import.meta.env.VITE_OPENAI_BASE_URL || "https://api.openai.com/v1";
 
-let memoryData = {
-  bills: [],
-  user: null,
-  emailLists: [],
-  notifications: [],
-  tweets: [],
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Returns the current authenticated user's UUID, throws if not signed in. */
+const getUserId = async () => {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.user?.id) throw new Error("Not authenticated");
+  return session.user.id;
 };
-let useMemoryStore = false;
-
-const getDefaultUser = () => ({
-  id: "local-user",
-  name: "Local User",
-  email: "local@example.com",
-  tracked_bill_ids: [],
-});
-
-const loadData = () => {
-  if (useMemoryStore || !storage) return { ...memoryData };
-  try {
-    const raw = storage.getItem(STORE_KEY);
-    if (!raw)
-      return {
-        bills: [],
-        user: null,
-        emailLists: [],
-        notifications: [],
-        tweets: [],
-      };
-    const parsed = JSON.parse(raw);
-    return parsed;
-  } catch (err) {
-    console.warn("Failed to parse stored data, switching to memory store", err);
-    useMemoryStore = true;
-    return { ...memoryData };
-  }
-};
-
-const saveData = (data) => {
-  if (useMemoryStore || !storage) {
-    memoryData = data;
-    return;
-  }
-  try {
-    storage.setItem(STORE_KEY, JSON.stringify(data));
-  } catch (err) {
-    console.warn("Storage unavailable, using in-memory store", err);
-    useMemoryStore = true;
-    memoryData = data;
-  }
-};
-
-const delay = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const sortByField = (items, sortKey) => {
   if (!sortKey) return items;
@@ -103,162 +62,275 @@ const extractJsonObject = (text) => {
 };
 
 export const api = {
+  // ─── Auth ───────────────────────────────────────────────────────────────────
   auth: {
     async me() {
-      await delay();
-      const data = loadData();
-      if (!data.user) {
-        const user = getDefaultUser();
-        saveData({ ...data, user });
-        return user;
+      const userId = await getUserId();
+      const { data: session } = await supabase.auth.getSession();
+      const supabaseUser = session?.session?.user;
+
+      // Try to fetch existing profile
+      const { data: existing, error: fetchError } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", userId)
+        .maybeSingle();
+
+      if (fetchError) throw fetchError;
+
+      // Profile exists — return it as-is (preserves tracked_bill_ids)
+      if (existing) {
+        return {
+          id: existing.id,
+          name: existing.name,
+          email: existing.email,
+          tracked_bill_ids: existing.tracked_bill_ids ?? [],
+        };
       }
-      return data.user;
+
+      // No profile yet (trigger missed) — create it now
+      const { data: created, error: createError } = await supabase
+        .from("profiles")
+        .insert({
+          id: userId,
+          email: supabaseUser?.email ?? null,
+          name:
+            supabaseUser?.user_metadata?.name ??
+            supabaseUser?.email?.split("@")[0] ??
+            "User",
+          tracked_bill_ids: [],
+        })
+        .select()
+        .single();
+      if (createError) throw createError;
+      return {
+        id: created.id,
+        name: created.name,
+        email: created.email,
+        tracked_bill_ids: [],
+      };
     },
+
     async updateMe(patch) {
-      await delay();
-      const data = loadData();
-      const baseUser = data.user || getDefaultUser();
-      const updated = {
-        ...baseUser,
-        ...patch,
-        tracked_bill_ids:
-          patch.tracked_bill_ids !== undefined
-            ? patch.tracked_bill_ids
-            : baseUser.tracked_bill_ids || [],
+      const userId = await getUserId();
+      const updatePayload = {};
+      if (patch.name !== undefined) updatePayload.name = patch.name;
+      if (patch.email !== undefined) updatePayload.email = patch.email;
+      if (patch.tracked_bill_ids !== undefined)
+        updatePayload.tracked_bill_ids = patch.tracked_bill_ids;
+
+      const { data, error } = await supabase
+        .from("profiles")
+        .update(updatePayload)
+        .eq("id", userId)
+        .select()
+        .single();
+      if (error) throw error;
+      return {
+        id: data.id,
+        name: data.name,
+        email: data.email,
+        tracked_bill_ids: data.tracked_bill_ids ?? [],
       };
-      saveData({ ...data, user: updated });
-      return updated;
     },
-    logout() {
-      if (storage) {
-        storage.removeItem(STORE_KEY);
-      }
-      memoryData = {
-        bills: [],
-        user: null,
-        emailLists: [],
-        notifications: [],
-        tweets: [],
-      };
-      return Promise.resolve();
+
+    async logout() {
+      await supabase.auth.signOut();
     },
+
     redirectToLogin() {
       return Promise.resolve();
     },
   },
+
+  // ─── Entities ──────────────────────────────────────────────────────────────
   entities: {
     Bill: {
       async list(sortKey = "-last_action_date") {
-        await delay();
-        const data = loadData();
-        return sortByField(data.bills || [], sortKey);
+        const userId = await getUserId();
+        const PAGE_SIZE = 1000;
+        let allBills = [];
+        let from = 0;
+
+        while (true) {
+          const { data, error } = await supabase
+            .from("bills")
+            .select("*")
+            .eq("user_id", userId)
+            .range(from, from + PAGE_SIZE - 1);
+
+          if (error) throw error;
+          if (!data || data.length === 0) break;
+          allBills = allBills.concat(data);
+          if (data.length < PAGE_SIZE) break;
+          from += PAGE_SIZE;
+        }
+
+        const key = sortKey.replace(/^-/, "");
+        const dir = sortKey.startsWith("-") ? -1 : 1;
+        return allBills.sort((a, b) => {
+          if (a[key] === b[key]) return 0;
+          return a[key] > b[key] ? dir : -dir;
+        });
       },
+
       async replaceAll(payloads) {
-        await delay();
-        const data = loadData();
+        const userId = await getUserId();
         const now = Date.now();
         const bills = payloads.map((payload, idx) => ({
           id:
             payload.id ||
             `bill-${payload.bill_number?.replace(/\s+/g, "-")}-${now}-${idx}`,
+          user_id: userId,
           ...payload,
           created_date: payload.created_date || new Date().toISOString(),
         }));
-        saveData({ ...data, bills });
-        return bills;
+
+        // Delete all existing bills for this user, then insert new ones
+        await supabase.from("bills").delete().eq("user_id", userId);
+        if (bills.length === 0) return [];
+
+        const { data, error } = await supabase
+          .from("bills")
+          .insert(bills)
+          .select();
+        if (error) throw error;
+        return data ?? [];
       },
+
       async create(payload) {
-        await delay();
-        const data = loadData();
+        const userId = await getUserId();
         const id =
           payload.id ||
           `bill-${payload.bill_number?.replace(/\s+/g, "-")}-${Date.now()}`;
         const newBill = {
           id,
+          user_id: userId,
           ...payload,
           created_date: payload.created_date || new Date().toISOString(),
         };
-        const bills = [...(data.bills || []), newBill];
-        saveData({ ...data, bills });
-        return newBill;
+        const { data, error } = await supabase
+          .from("bills")
+          .insert(newBill)
+          .select()
+          .single();
+        if (error) throw error;
+        return data;
       },
+
       async update(id, patch) {
-        await delay();
-        const data = loadData();
-        const bills = (data.bills || []).map((b) =>
-          b.id === id ? { ...b, ...patch } : b,
-        );
-        saveData({ ...data, bills });
-        return bills.find((b) => b.id === id);
+        const userId = await getUserId();
+        const { data, error } = await supabase
+          .from("bills")
+          .update(patch)
+          .eq("id", id)
+          .eq("user_id", userId)
+          .select()
+          .single();
+        if (error) throw error;
+        return data;
       },
+
       async delete(id) {
-        await delay();
-        const data = loadData();
-        const bills = (data.bills || []).filter((b) => b.id !== id);
-        saveData({ ...data, bills });
+        const userId = await getUserId();
+        const { error } = await supabase
+          .from("bills")
+          .delete()
+          .eq("id", id)
+          .eq("user_id", userId);
+        if (error) throw error;
         return { success: true };
       },
+
       async clearAll() {
-        await delay();
-        const data = loadData();
-        saveData({ ...data, bills: [] });
+        const userId = await getUserId();
+        const { error } = await supabase
+          .from("bills")
+          .delete()
+          .eq("user_id", userId);
+        if (error) throw error;
         return { success: true };
       },
     },
+
     EmailList: {
       async list(sortKey = "-created_date") {
-        await delay();
-        const data = loadData();
-        return sortByField(data.emailLists || [], sortKey);
+        const userId = await getUserId();
+        const { data, error } = await supabase
+          .from("email_lists")
+          .select("*")
+          .eq("user_id", userId);
+        if (error) throw error;
+        return sortByField(data ?? [], sortKey);
       },
+
       async create(payload) {
-        await delay();
-        const data = loadData();
+        const userId = await getUserId();
         const id = payload.id || `list-${Date.now()}`;
         const newList = {
           id,
+          user_id: userId,
           ...payload,
           created_date: payload.created_date || new Date().toISOString(),
         };
-        const emailLists = [...(data.emailLists || []), newList];
-        saveData({ ...data, emailLists });
-        return newList;
+        const { data, error } = await supabase
+          .from("email_lists")
+          .insert(newList)
+          .select()
+          .single();
+        if (error) throw error;
+        return data;
       },
     },
+
     Notification: {
       async list(sortKey = "-created_date", limit = 50) {
-        await delay();
-        const data = loadData();
-        const sorted = sortByField(data.notifications || [], sortKey);
-        return sorted.slice(0, limit);
+        const userId = await getUserId();
+        const { data, error } = await supabase
+          .from("notifications")
+          .select("*")
+          .eq("user_id", userId)
+          .limit(limit);
+        if (error) throw error;
+        return sortByField(data ?? [], sortKey);
       },
+
       async create(payload) {
-        await delay();
-        const data = loadData();
+        const userId = await getUserId();
         const newNotification = {
           id: payload.id || `notif-${Date.now()}`,
+          user_id: userId,
           ...payload,
           created_date: payload.created_date || new Date().toISOString(),
         };
-        const notifications = [...(data.notifications || []), newNotification];
-        saveData({ ...data, notifications });
-        return { status: "sent", ...newNotification };
+        const { data, error } = await supabase
+          .from("notifications")
+          .insert(newNotification)
+          .select()
+          .single();
+        if (error) throw error;
+        return { status: "sent", ...data };
       },
     },
+
     Tweet: {
       async list(sortKey = "-posted_at", limit = 50) {
-        await delay();
-        const data = loadData();
-        const sorted = sortByField(data.tweets || [], sortKey);
-        return sorted.slice(0, limit);
+        const userId = await getUserId();
+        const { data, error } = await supabase
+          .from("tweets")
+          .select("*")
+          .eq("user_id", userId)
+          .limit(limit);
+        if (error) throw error;
+        return sortByField(data ?? [], sortKey);
       },
     },
   },
+
+  // ─── Integrations ──────────────────────────────────────────────────────────
   integrations: {
     Core: {
       async InvokeLLM(params) {
-        await delay();
-
         if (!OPENAI_API_KEY) {
           throw new Error(
             "AI is not configured. Add VITE_OPENAI_API_KEY to your .env file.",
@@ -293,12 +365,6 @@ export const api = {
               : params.prompt
             : "",
         );
-        console.log(
-          "User prompt likely truncated before send",
-          typeof params?.prompt === "string"
-            ? params.prompt.length > 30000
-            : false,
-        );
         console.groupEnd();
 
         const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
@@ -325,8 +391,8 @@ export const api = {
           );
         }
 
-        const data = await response.json();
-        const content = data?.choices?.[0]?.message?.content || "";
+        const responseData = await response.json();
+        const content = responseData?.choices?.[0]?.message?.content || "";
 
         if (expectsJson) {
           const parsed = extractJsonObject(content);
@@ -338,14 +404,15 @@ export const api = {
 
         return {
           text: content,
-          usage: data?.usage,
+          usage: responseData?.usage,
         };
       },
     },
   },
+
+  // ─── App Logs ──────────────────────────────────────────────────────────────
   appLogs: {
     async logUserInApp(pageName) {
-      await delay();
       console.debug("User navigated to:", pageName);
       return { success: true };
     },

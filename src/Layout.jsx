@@ -1,6 +1,7 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import { createPageUrl } from "@/utils";
+import { useAuth } from "@/lib/AuthContext";
 import {
   LayoutDashboard,
   Mail,
@@ -9,6 +10,7 @@ import {
   User,
   Twitter,
   Settings,
+  LogOut,
 } from "lucide-react";
 import {
   Sidebar,
@@ -61,6 +63,7 @@ const navigationItems = [
 
 export default function Layout({ children, currentPageName }) {
   const location = useLocation();
+  const { user, logout } = useAuth();
 
   return (
     <SidebarProvider>
@@ -147,17 +150,24 @@ export default function Layout({ children, currentPageName }) {
 
           <SidebarFooter className="border-t border-slate-200 p-4">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 bg-slate-100 rounded-full flex items-center justify-center">
+              <div className="w-9 h-9 bg-slate-100 rounded-full flex items-center justify-center shrink-0">
                 <User className="w-5 h-5 text-slate-600" />
               </div>
               <div className="flex-1 min-w-0">
                 <p className="font-semibold text-slate-900 text-sm truncate">
-                  Legislative User
+                  {user?.name ?? "User"}
                 </p>
                 <p className="text-xs text-slate-500 truncate">
-                  Government Professional
+                  {user?.email ?? ""}
                 </p>
               </div>
+              <button
+                onClick={logout}
+                title="Sign out"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
             </div>
           </SidebarFooter>
         </Sidebar>
