@@ -163,3 +163,82 @@ create policy "Users manage their own tweets"
   on public.tweets for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+
+-- ─── Teams ────────────────────────────────────────────────────
+-- One team can be owned by a user; other users can be invited as members.
+create table if not exists public.teams (
+  id         uuid primary key default uuid_generate_v4(),
+  name       text not null,
+  created_by uuid references auth.users(id) on delete cascade,
+  created_at timestamptz default now()
+);
+
+alter table public.teams enable row level security;
+
+create policy "Team owner full access"
+  on public.teams for all
+  using (created_by = auth.uid());
+
+-- ─── Team Members ─────────────────────────────────────────────
+create table if not exists public.team_members (
+  id        uuid primary key default uuid_generate_v4(),
+  team_id   uuid not null references public.teams(id) on delete cascade,
+  user_id   uuid references auth.users(id) on delete set null,
+  email     text not null,
+  role      text not null default 'member',   -- 'owner' | 'member'
+  status    text not null default 'active',   -- 'active' | 'pending'
+  joined_at timestamptz default now()
+);
+
+alter table public.team_members enable row level security;
+
+create policy "Team participants can read members"
+  on public.team_members for select
+  using (
+    team_id in (
+      select id   from public.teams        where created_by = auth.uid()
+      union
+      select team_id from public.team_members where user_id = auth.uid()
+    )
+  );
+
+create policy "Team owners can manage members"
+  on public.team_members for all
+  using (
+    team_id in (select id from public.teams where created_by = auth.uid())
+  );
+
+create policy "Users can activate their own invite"
+  on public.team_members for update
+  using (
+    email = (select email from auth.users where id = auth.uid())
+  );
+
+-- Add this after team_members exists (was forward-referenced above)
+create policy "Team members can read their team"
+  on public.teams for select
+  using (
+    id in (select team_id from public.team_members where user_id = auth.uid())
+  );
+
+-- ─── Team Bills ───────────────────────────────────────────────
+create table if not exists public.team_bills (
+  id          uuid primary key default uuid_generate_v4(),
+  team_id     uuid not null references public.teams(id) on delete cascade,
+  bill_number text not null,
+  added_by    uuid references auth.users(id) on delete set null,
+  added_at    timestamptz default now(),
+  unique(team_id, bill_number)
+);
+
+alter table public.team_bills enable row level security;
+
+create policy "Team members can manage team bills"
+  on public.team_bills for all
+  using (
+    team_id in (
+      select id   from public.teams        where created_by = auth.uid()
+      union
+      select team_id from public.team_members where user_id = auth.uid() and status = 'active'
+    )
+  );

@@ -11,6 +11,7 @@ import {
   ExternalLink,
   Plus,
   Check,
+  Users,
 } from "lucide-react";
 import { format } from "date-fns";
 
@@ -40,6 +41,9 @@ export default function BillCard({
   onViewDetails,
   onToggleTracking,
   isTracked,
+  isInTeam,
+  onAddToTeam,
+  teamButtonLabel,
 }) {
   const ChamberIcon = getChamberIcon(bill.chamber);
   const [showAllSponsors, setShowAllSponsors] = useState(false);
@@ -192,7 +196,22 @@ export default function BillCard({
           </div>
         )}
 
-        <div className="flex justify-end pt-2">
+        <div className="flex justify-end pt-2 gap-2">
+          {onAddToTeam && (
+            <Button
+              variant={isInTeam ? "default" : "outline"}
+              size="sm"
+              onClick={onAddToTeam}
+              className={
+                isInTeam
+                  ? "bg-green-600 hover:bg-green-700 text-white gap-1"
+                  : "border-green-200 text-green-600 hover:bg-green-50 gap-1"
+              }
+            >
+              <Users className="w-3 h-3" />
+              {teamButtonLabel ?? (isInTeam ? "In Team" : "Add to Team")}
+            </Button>
+          )}
           <Button
             variant="outline"
             onClick={() => onViewDetails(bill)}

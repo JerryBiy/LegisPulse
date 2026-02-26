@@ -325,6 +325,127 @@ export const api = {
         return sortByField(data ?? [], sortKey);
       },
     },
+
+    Team: {
+      async getOrCreate() {
+        const userId = await getUserId();
+        const { data: sessionData } = await supabase.auth.getSession();
+        const email = sessionData?.session?.user?.email ?? "";
+
+        // Check if user owns a team
+        const { data: owned, error: ownedErr } = await supabase
+          .from("teams")
+          .select("*")
+          .eq("created_by", userId)
+          .maybeSingle();
+        if (ownedErr) throw ownedErr;
+        if (owned) return owned;
+
+        // Check if user is an active member of another team
+        const { data: membership, error: memberErr } = await supabase
+          .from("team_members")
+          .select("team_id, teams(*)")
+          .eq("user_id", userId)
+          .eq("status", "active")
+          .maybeSingle();
+        if (memberErr) throw memberErr;
+        if (membership?.teams) return membership.teams;
+
+        // Auto-create a new team
+        const firstName = email.split("@")[0] || "My";
+        const { data: newTeam, error } = await supabase
+          .from("teams")
+          .insert({ name: `${firstName}'s Team`, created_by: userId })
+          .select()
+          .single();
+        if (error) throw error;
+
+        // Add self as owner member
+        await supabase.from("team_members").insert({
+          team_id: newTeam.id,
+          user_id: userId,
+          email,
+          role: "owner",
+          status: "active",
+        });
+        return newTeam;
+      },
+
+      async acceptPendingInvites() {
+        const userId = await getUserId();
+        const { data: sessionData } = await supabase.auth.getSession();
+        const email = sessionData?.session?.user?.email;
+        if (!email) return;
+        await supabase
+          .from("team_members")
+          .update({ user_id: userId, status: "active" })
+          .eq("email", email)
+          .eq("status", "pending");
+      },
+
+      async getMembers(teamId) {
+        const { data, error } = await supabase
+          .from("team_members")
+          .select("*")
+          .eq("team_id", teamId)
+          .order("joined_at");
+        if (error) throw error;
+        return data ?? [];
+      },
+
+      async inviteMember(teamId, email) {
+        const { data, error } = await supabase
+          .from("team_members")
+          .insert({
+            team_id: teamId,
+            email: email.toLowerCase().trim(),
+            role: "member",
+            status: "pending",
+            user_id: null,
+          })
+          .select()
+          .single();
+        if (error) throw error;
+        return data;
+      },
+
+      async removeMember(memberId) {
+        const { error } = await supabase
+          .from("team_members")
+          .delete()
+          .eq("id", memberId);
+        if (error) throw error;
+      },
+
+      async getBillNumbers(teamId) {
+        const { data, error } = await supabase
+          .from("team_bills")
+          .select("bill_number")
+          .eq("team_id", teamId);
+        if (error) throw error;
+        return (data ?? []).map((r) => r.bill_number);
+      },
+
+      async addBill(teamId, billNumber) {
+        const userId = await getUserId();
+        const { error } = await supabase
+          .from("team_bills")
+          .upsert(
+            { team_id: teamId, bill_number: billNumber, added_by: userId },
+            { onConflict: "team_id,bill_number" },
+          );
+        if (error) throw error;
+      },
+
+      async removeBill(teamId, billNumber) {
+        const { error } = await supabase
+          .from("team_bills")
+          .delete()
+          .eq("team_id", teamId)
+          .eq("bill_number", billNumber);
+        if (error) throw error;
+      },
+    },
   },
 
   // ─── Integrations ──────────────────────────────────────────────────────────

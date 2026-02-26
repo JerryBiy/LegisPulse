@@ -11,6 +11,7 @@ import {
   Twitter,
   Settings,
   LogOut,
+  Users,
 } from "lucide-react";
 import {
   Sidebar,
@@ -40,6 +41,12 @@ const navigationItems = [
     url: createPageUrl("TrackedBills"),
     icon: Bell,
     description: "Your Monitored Legislation",
+  },
+  {
+    title: "Team",
+    url: createPageUrl("Team"),
+    icon: Users,
+    description: "Shared Bills with Your Team",
   },
   {
     title: "Twitter Feed",

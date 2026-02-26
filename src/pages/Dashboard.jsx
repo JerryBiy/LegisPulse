@@ -8,9 +8,11 @@ import BillCard from "../components/bills/BillCard";
 import BillFilters from "../components/bills/BillFilters";
 import BillDetailsModal from "../components/bills/BillDetailsModal";
 import BillSyncButton from "../components/bills/BillSyncButton";
+import { useToast } from "@/components/ui/use-toast";
 
 export default function Dashboard() {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const [filteredBills, setFilteredBills] = useState([]);
   const [displayedBills, setDisplayedBills] = useState([]);
   const [displayCount, setDisplayCount] = useState(10);
@@ -35,6 +37,71 @@ export default function Dashboard() {
   });
 
   const trackedBillIds = userData?.tracked_bill_ids ?? [];
+
+  // ── Team ────────────────────────────────────────────────────────────────────
+  const { data: team } = useQuery({
+    queryKey: ["team"],
+    queryFn: () =>
+      api.entities.Team.getOrCreate().catch((err) => {
+        console.error("[Team] getOrCreate failed:", err?.message, err);
+        return null;
+      }),
+    staleTime: 0,
+    retry: 1,
+  });
+  const teamId = team?.id;
+
+  const { data: teamBillNumbers = [] } = useQuery({
+    queryKey: ["teamBills", teamId],
+    queryFn: () => api.entities.Team.getBillNumbers(teamId),
+    enabled: !!teamId,
+  });
+
+  const teamBillMutation = useMutation({
+    mutationFn: ({ action, billNumber }) =>
+      action === "add"
+        ? api.entities.Team.addBill(teamId, billNumber)
+        : api.entities.Team.removeBill(teamId, billNumber),
+    onMutate: async ({ action, billNumber }) => {
+      await queryClient.cancelQueries({ queryKey: ["teamBills", teamId] });
+      const prev = queryClient.getQueryData(["teamBills", teamId]);
+      queryClient.setQueryData(["teamBills", teamId], (old) =>
+        action === "add"
+          ? [...(old ?? []), billNumber]
+          : (old ?? []).filter((n) => n !== billNumber),
+      );
+      return { prev };
+    },
+    onError: (_e, _v, ctx) => {
+      queryClient.setQueryData(["teamBills", teamId], ctx.prev);
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["teamBills", teamId] });
+    },
+  });
+
+  const handleAddToTeam = (billNumber) => {
+    if (!teamId) {
+      toast({
+        title: "Team not ready",
+        description:
+          "The team feature requires the database tables to be set up. Please run the SQL migration in Supabase.",
+        variant: "destructive",
+        duration: 4000,
+      });
+      return;
+    }
+    const isCurrentlyInTeam = teamBillNumbers.includes(billNumber);
+    teamBillMutation.mutate({
+      action: isCurrentlyInTeam ? "remove" : "add",
+      billNumber,
+    });
+    toast({
+      title: isCurrentlyInTeam ? "Removed from team" : "Added to team",
+      description: `${billNumber} ${isCurrentlyInTeam ? "removed from" : "added to"} your team's bills.`,
+      duration: 3000,
+    });
+  };
 
   const trackMutation = useMutation({
     mutationFn: (newIds) => api.auth.updateMe({ tracked_bill_ids: newIds }),
@@ -344,6 +411,8 @@ export default function Dashboard() {
                         onViewDetails={setSelectedBill}
                         onToggleTracking={handleToggleTracking}
                         isTracked={trackedBillIds.includes(bill.bill_number)}
+                        isInTeam={teamBillNumbers.includes(bill.bill_number)}
+                        onAddToTeam={() => handleAddToTeam(bill.bill_number)}
                       />
                     </motion.div>
                   ))}
@@ -385,6 +454,16 @@ export default function Dashboard() {
         }
         onToggleTracking={handleToggleTracking}
         onBillUpdate={handleBillUpdate}
+        isInTeam={
+          selectedBill
+            ? teamBillNumbers.includes(selectedBill.bill_number)
+            : false
+        }
+        onAddToTeam={
+          selectedBill
+            ? () => handleAddToTeam(selectedBill.bill_number)
+            : undefined
+        }
       />
     </div>
   );

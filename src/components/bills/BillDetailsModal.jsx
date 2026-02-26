@@ -18,6 +18,7 @@ import {
   StarOff,
   Sparkles,
   BookOpen,
+  Users,
 } from "lucide-react";
 import { format } from "date-fns";
 import { api } from "@/api/apiClient";
@@ -123,6 +124,8 @@ export default function BillDetailsModal({
   isTracked,
   onToggleTracking,
   onBillUpdate,
+  isInTeam,
+  onAddToTeam,
 }) {
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [generatedSummary, setGeneratedSummary] = useState(null);
@@ -439,6 +442,21 @@ export default function BillDetailsModal({
                   <StarOff className="w-5 h-5 text-slate-400" />
                 )}
               </Button>
+              {onAddToTeam && (
+                <Button
+                  variant={isInTeam ? "default" : "outline"}
+                  size="sm"
+                  onClick={onAddToTeam}
+                  className={
+                    isInTeam
+                      ? "bg-green-600 hover:bg-green-700 text-white gap-2"
+                      : "border-green-200 text-green-600 hover:bg-green-50 gap-2"
+                  }
+                >
+                  <Users className="w-4 h-4" />
+                  {isInTeam ? "In Team" : "Add to Team"}
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
