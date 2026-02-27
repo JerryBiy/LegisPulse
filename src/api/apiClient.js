@@ -480,6 +480,100 @@ export const api = {
         if (error) throw error;
       },
     },
+
+    TeamChat: {
+      /** Fetch messages for a team via a SECURITY DEFINER RPC — bypasses RLS entirely. */
+      async getMessages(teamId) {
+        const { data, error } = await supabase.rpc("get_team_chat_messages", {
+          p_team_id: teamId,
+        });
+        if (error) throw error;
+        return (data ?? []).map((m) => ({
+          ...m,
+          profiles: { name: m.sender_name, email: m.sender_email },
+        }));
+      },
+
+      /** Enrich a bare realtime message row with its sender's profile. */
+      async enrichMessage(msg, teamId) {
+        const { data: profiles } = await supabase.rpc(
+          "get_team_member_profiles",
+          { p_team_id: teamId },
+        );
+        const profile =
+          (profiles ?? []).find((p) => p.id === msg.user_id) ?? null;
+        return { ...msg, profiles: profile };
+      },
+
+      /** Upload a file to Supabase Storage, returns { url, name, type, size }. */
+      async uploadFile(teamId, file) {
+        const userId = await getUserId();
+        const ext = file.name.split(".").pop();
+        const path = `${userId}/${teamId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+        const { error } = await supabase.storage
+          .from("team-chat-files")
+          .upload(path, file, { cacheControl: "3600", upsert: false });
+        if (error) throw error;
+        const { data: urlData } = supabase.storage
+          .from("team-chat-files")
+          .getPublicUrl(path);
+        return {
+          url: urlData.publicUrl,
+          name: file.name,
+          type: file.type,
+          size: file.size,
+        };
+      },
+
+      /** Send a message with optional attachment. */
+      async sendMessage(teamId, message, attachment = null) {
+        const params = {
+          p_team_id: teamId,
+          p_message: (message || "").trim(),
+          p_attachment_url: attachment?.url ?? null,
+          p_attachment_name: attachment?.name ?? null,
+          p_attachment_type: attachment?.type ?? null,
+          p_attachment_size: attachment?.size ?? null,
+        };
+        const { data, error } = await supabase.rpc(
+          "send_team_chat_message",
+          params,
+        );
+        if (error) throw error;
+        const row = Array.isArray(data) ? data[0] : data;
+        if (!row) throw new Error("Message was not saved.");
+        return {
+          ...row,
+          profiles: { name: row.sender_name, email: row.sender_email },
+        };
+      },
+
+      /** Delete one of your own messages. */
+      async deleteMessage(messageId) {
+        const { error } = await supabase
+          .from("team_chat_messages")
+          .delete()
+          .eq("id", messageId);
+        if (error) throw error;
+      },
+
+      /** Subscribe to real-time new messages for a team. Returns the channel so it can be unsubscribed. */
+      subscribeToMessages(teamId, onInsert) {
+        return supabase
+          .channel(`team_chat_${teamId}`)
+          .on(
+            "postgres_changes",
+            {
+              event: "INSERT",
+              schema: "public",
+              table: "team_chat_messages",
+              filter: `team_id=eq.${teamId}`,
+            },
+            (payload) => onInsert(payload.new),
+          )
+          .subscribe();
+      },
+    },
   },
 
   // ─── Integrations ──────────────────────────────────────────────────────────

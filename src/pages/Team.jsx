@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import BillCard from "@/components/bills/BillCard";
 import BillDetailsModal from "@/components/bills/BillDetailsModal";
+import TeamChat from "@/components/TeamChat";
 
 export default function Team() {
   const queryClient = useQueryClient();
@@ -417,6 +418,9 @@ export default function Team() {
             </div>
           )}
         </div>
+
+        {/* Team Chat */}
+        <TeamChat teamId={teamId} />
       </div>
 
       <BillDetailsModal

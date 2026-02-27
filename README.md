@@ -7,6 +7,7 @@ LegisPulse tracks Georgia legislative bills and provides AI-generated bill analy
 - **User accounts** — register, log in, and log out with email/password (powered by Supabase Auth)
 - **Per-user data** — tracked bills, email lists, and notifications are stored in a cloud database, tied to your account
 - **Team collaboration** — create a team, invite colleagues by email, share bills across the team
+- **Team chat** — real-time messaging between team members with emoji, file/image attachments, drag-and-drop upload, and auto-expiry after 2½ weeks
 - Sync Georgia bills from LegiScan (full session, 4000+ bills via paginated fetch)
 - Auto-sync on first load when no bills are in the database
 - Show newest bills first (higher bill number first)
@@ -37,24 +38,62 @@ Each user belongs to exactly one team. The owner can invite other registered use
 - `teams` — one row per team (`id`, `name`, `created_by`)
 - `team_members` — join table (`team_id`, `user_id`, `email`, `role`, `status`)
 - `team_bills` — shared bills (`team_id`, `bill_number`)
+- `team_chat_messages` — chat messages (`team_id`, `user_id`, `message`, attachment columns, `created_at`)
 
 ### RPC functions (security definer — bypass RLS)
 
-| Function                            | Purpose                                                                 |
-| ----------------------------------- | ----------------------------------------------------------------------- |
-| `my_team_ids()`                     | Returns team IDs the caller owns or is active in (used in RLS policies) |
-| `get_my_pending_invites()`          | Returns pending invites for the caller's email                          |
-| `accept_my_team_invites()`          | Accepts all pending invites for the caller                              |
-| `decline_my_team_invite(invite_id)` | Declines a specific pending invite                                      |
-| `remove_team_member(member_id)`     | Owner removes a member from their team                                  |
-| `leave_my_team(p_team_id)`          | Member leaves a team they joined                                        |
+| Function                              | Purpose                                                                 |
+| ------------------------------------- | ----------------------------------------------------------------------- | --- | ------------------- | --------------------------------------------------------- |
+| `my_team_ids()`                       | Returns team IDs the caller owns or is active in (used in RLS policies) |
+| `get_my_pending_invites()`            | Returns pending invites for the caller's email                          |
+| `accept_my_team_invites()`            | Accepts all pending invites for the caller                              |
+| `decline_my_team_invite(invite_id)`   | Declines a specific pending invite                                      |
+| `remove_team_member(member_id)`       | Owner removes a member from their team                                  |
+| `leave_my_team(p_team_id)`            | Member leaves a team they joined                                        |     | `get_my_team_ids()` | Returns team IDs the caller belongs to (used by chat RLS) |
+| `get_team_member_profiles(p_team_id)` | Returns profile info for all members of a team                          |
+| `get_team_chat_messages(p_team_id)`   | Returns chat messages with sender info (security definer)               |
+| `send_team_chat_message(...)`         | Inserts a chat message with optional attachment fields                  |
+| `cleanup_old_chat_messages()`         | Deletes messages older than 2½ weeks (runs via pg_cron every 6 hours)   |
+
+## Team Chat
+
+Real-time chat embedded in the Team page. All operations use `SECURITY DEFINER` RPCs to avoid RLS recursion.
+
+### Features
+
+- **Real-time messaging** — uses Supabase Realtime (`postgres_changes`) for instant delivery
+- **Emoji picker** — powered by `@emoji-mart/react`; click the smiley icon to browse and insert emoji
+- **File & image attachments** — click the paperclip icon or drag-and-drop a file (max 10 MB) onto the chat card
+- **Inline image preview** — image attachments render as thumbnails in the message bubble
+- **File download** — non-image attachments show as a card with filename, size, and a download button
+- **2-minute delete window** — you can only delete your own messages within 2 minutes of sending
+- **Auto-expiry** — a `pg_cron` job runs every 6 hours and deletes messages older than 2½ weeks
+- **Optimistic UI** — messages appear instantly while uploading/sending
+
+### Storage
+
+Attachments are uploaded to a Supabase Storage bucket named `team-chat-files`. Storage policies allow any authenticated user to upload, anyone to read, and only the uploader to delete their own files.
+
+### Migrations
+
+| File                         | Purpose                                                                       |
+| ---------------------------- | ----------------------------------------------------------------------------- |
+| `003_team_chat.sql`          | Base `team_chat_messages` table, RLS, Realtime, cleanup function, pg_cron job |
+| `004_chat_rls_fix.sql`       | `get_my_team_ids()` helper, recreated RLS policies                            |
+| `005_chat_messages_rpc.sql`  | `get_team_chat_messages` RPC                                                  |
+| `006_chat_send_rpc.sql`      | `send_team_chat_message` RPC                                                  |
+| `007_chat_all_functions.sql` | Comprehensive file with all 5 chat functions                                  |
+| `008_chat_attachments.sql`   | Attachment columns, storage bucket, updated RPCs                              |
+
+Run each migration in the Supabase **SQL Editor** in order.
 
 ## Tech Stack
 
 - React 18 + Vite
 - Tailwind CSS + Radix UI (shadcn/ui components)
-- **Supabase** — PostgreSQL database + Row Level Security + Auth
+- **Supabase** — PostgreSQL database + Row Level Security + Auth + Realtime + Storage
 - **@tanstack/react-query** — client-side data caching (5-minute stale time, shared cache keys)
+- **@emoji-mart/react** — emoji picker for team chat
 - `src/api/apiClient.js` — unified data layer over Supabase
 
 ## Environment Variables
@@ -202,6 +241,7 @@ src/
     Settings.jsx         – user settings
     EmailLists.jsx       – email list management
   components/
+    TeamChat.jsx         – real-time team chat with emoji, file upload, drag-drop
     bills/
       BillCard.jsx       – bill card with track + add-to-team buttons
       BillDetailsModal   – bill details + AI analysis + track/team actions
