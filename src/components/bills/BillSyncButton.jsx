@@ -2,9 +2,19 @@ import { useState, useEffect, useRef } from "react";
 import { api } from "@/api/apiClient";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { RefreshCw, Download, CheckCircle, AlertCircle } from "lucide-react";
+import {
+  RefreshCw,
+  Download,
+  CheckCircle,
+  AlertCircle,
+  WrenchIcon,
+} from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { fetchGABills, isLegiScanConfigured } from "@/services/legiscan";
+
+function isMaintenance(msg) {
+  return typeof msg === "string" && msg.toLowerCase().includes("maintenance");
+}
 
 export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
   const [isSyncing, setIsSyncing] = useState(false);
@@ -67,11 +77,14 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
         onSyncComplete();
       }
     } catch (error) {
-      console.error("Error syncing bills:", error);
+      const msg = error.message || "Failed to sync bills. Please try again.";
       setSyncStatus({
         success: false,
-        message: error.message || "Failed to sync bills. Please try again.",
-        error: error.message,
+        maintenance: isMaintenance(msg),
+        message: isMaintenance(msg)
+          ? "LegiScan API is currently offline for maintenance. Please try again later."
+          : msg,
+        error: isMaintenance(msg) ? null : msg,
       });
     }
 
@@ -81,22 +94,33 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
   useEffect(() => {
     if (autoSync && !autoSyncFired.current && !isSyncing) {
       autoSyncFired.current = true;
+      // Pre-check: skip auto-sync if LegiScan just told us it's in maintenance
+      if (syncStatus?.maintenance) return;
       syncBillsFromWebsite();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoSync]);
+  }, [autoSync, syncStatus?.maintenance]);
 
   return (
     <div className="space-y-3">
       <Button
         onClick={syncBillsFromWebsite}
         disabled={isSyncing}
-        className="bg-green-600 hover:bg-green-700 gap-2"
+        className={
+          syncStatus?.maintenance
+            ? "bg-amber-600 hover:bg-amber-700 gap-2"
+            : "bg-green-600 hover:bg-green-700 gap-2"
+        }
       >
         {isSyncing ? (
           <>
             <RefreshCw className="w-4 h-4 animate-spin" />
             Syncing from LegiScan...
+          </>
+        ) : syncStatus?.maintenance ? (
+          <>
+            <WrenchIcon className="w-4 h-4" />
+            LegiScan Offline — Retry
           </>
         ) : (
           <>
@@ -141,19 +165,29 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
           className={
             syncStatus.success
               ? "border-green-200 bg-green-50"
-              : "border-red-200 bg-red-50"
+              : syncStatus.maintenance
+                ? "border-amber-200 bg-amber-50"
+                : "border-red-200 bg-red-50"
           }
         >
           <CardContent className="p-4">
             <div className="flex items-start gap-3">
               {syncStatus.success ? (
                 <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+              ) : syncStatus.maintenance ? (
+                <WrenchIcon className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
               ) : (
                 <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
               )}
               <div className="space-y-1">
                 <p
-                  className={`font-medium ${syncStatus.success ? "text-green-900" : "text-red-900"}`}
+                  className={`font-medium ${
+                    syncStatus.success
+                      ? "text-green-900"
+                      : syncStatus.maintenance
+                        ? "text-amber-900"
+                        : "text-red-900"
+                  }`}
                 >
                   {syncStatus.message}
                 </p>

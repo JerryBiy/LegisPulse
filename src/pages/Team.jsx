@@ -12,6 +12,7 @@ import {
   CheckCircle,
   XCircle,
   LogOut,
+  Hash,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,15 +28,22 @@ export default function Team() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteError, setInviteError] = useState("");
   const [selectedBill, setSelectedBill] = useState(null);
+  const [newTeamName, setNewTeamName] = useState("");
+  const [creatingTeam, setCreatingTeam] = useState(false);
+  const [createTeamError, setCreateTeamError] = useState("");
+  const [joinCode, setJoinCode] = useState("");
+  const [joiningTeam, setJoiningTeam] = useState(false);
+  const [joinError, setJoinError] = useState("");
+  const [codeCopied, setCodeCopied] = useState(false);
 
-  // Load (or auto-create) the current user's team
+  // Load the current user's team (no auto-create — returns null if user has no team)
   const {
     data: team,
     isLoading: loadingTeam,
     refetch: refetchTeam,
   } = useQuery({
     queryKey: ["team"],
-    queryFn: () => api.entities.Team.getOrCreate(),
+    queryFn: () => api.entities.Team.get(),
     staleTime: 0,
     retry: 1,
   });
@@ -113,16 +121,67 @@ export default function Team() {
   const isOwner = team?.created_by === authUser?.id;
 
   const handleLeaveTeam = async () => {
-    if (!window.confirm("Are you sure you want to leave this team?")) return;
+    const activeMembers = members.filter(
+      (m) => m.status === "active" && m.user_id !== authUser?.id,
+    );
+    const confirmMsg = isOwner
+      ? activeMembers.length > 0
+        ? `You are the team owner. Leaving will transfer ownership to ${activeMembers[0]?.email ?? "the next member"}. Continue?`
+        : "You are the only member. Leaving will permanently delete this team. Continue?"
+      : "Are you sure you want to leave this team?";
+    if (!window.confirm(confirmMsg)) return;
     try {
       await api.entities.Team.leaveTeam(teamId);
-      await queryClient.refetchQueries({ queryKey: ["team"] });
+      queryClient.setQueryData(["team"], null); // show no-team screen immediately
       queryClient.removeQueries({ queryKey: ["teamMembers", teamId] });
       queryClient.removeQueries({ queryKey: ["teamBills", teamId] });
     } catch (err) {
       console.error("[Leave team]", err);
       alert(err?.message ?? "Failed to leave team.");
     }
+  };
+
+  const handleCreateTeam = async () => {
+    if (!newTeamName.trim()) {
+      setCreateTeamError("Please enter a team name.");
+      return;
+    }
+    setCreatingTeam(true);
+    setCreateTeamError("");
+    try {
+      const created = await api.entities.Team.createTeam(newTeamName);
+      queryClient.setQueryData(["team"], created);
+      setNewTeamName("");
+    } catch (err) {
+      setCreateTeamError(err?.message ?? "Failed to create team.");
+    } finally {
+      setCreatingTeam(false);
+    }
+  };
+
+  const handleJoinByCode = async () => {
+    if (!joinCode.trim()) {
+      setJoinError("Please enter a team code.");
+      return;
+    }
+    setJoiningTeam(true);
+    setJoinError("");
+    try {
+      const joined = await api.entities.Team.joinByCode(joinCode);
+      queryClient.setQueryData(["team"], joined);
+      setJoinCode("");
+    } catch (err) {
+      setJoinError(err?.message ?? "Invalid code or unable to join.");
+    } finally {
+      setJoiningTeam(false);
+    }
+  };
+
+  const handleCopyCode = () => {
+    if (!team?.team_code) return;
+    navigator.clipboard.writeText(team.team_code);
+    setCodeCopied(true);
+    setTimeout(() => setCodeCopied(false), 2000);
   };
 
   // ── Mutations ──────────────────────────────────────────────────────────────
@@ -175,6 +234,106 @@ export default function Team() {
     );
   }
 
+  // ── No team screen ────────────────────────────────────────────────────────
+  if (!team) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+        <div className="max-w-lg w-full space-y-5">
+          <div className="text-center space-y-2">
+            <div className="inline-flex p-4 bg-slate-100 rounded-full mb-2">
+              <Users className="w-8 h-8 text-slate-500" />
+            </div>
+            <h1 className="text-2xl font-bold text-slate-900">No Team Yet</h1>
+            <p className="text-slate-500 text-sm">
+              Create a new team or join an existing one with a team code.
+            </p>
+          </div>
+
+          {/* Create team */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2">
+                <UserPlus className="w-4 h-4 text-blue-600" />
+                Create a New Team
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Input
+                placeholder="Team name"
+                value={newTeamName}
+                onChange={(e) => {
+                  setNewTeamName(e.target.value);
+                  setCreateTeamError("");
+                }}
+                onKeyDown={(e) => e.key === "Enter" && handleCreateTeam()}
+              />
+              <Button
+                className="w-full bg-blue-600 hover:bg-blue-700 gap-2"
+                onClick={handleCreateTeam}
+                disabled={creatingTeam}
+              >
+                {creatingTeam ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <UserPlus className="w-4 h-4" />
+                )}
+                Create Team
+              </Button>
+              {createTeamError && (
+                <p className="text-sm text-red-600">{createTeamError}</p>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Divider */}
+          <div className="flex items-center gap-3">
+            <div className="flex-1 border-t border-slate-200" />
+            <span className="text-xs text-slate-400 uppercase tracking-wide">
+              or
+            </span>
+            <div className="flex-1 border-t border-slate-200" />
+          </div>
+
+          {/* Join by code */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Hash className="w-4 h-4 text-green-600" />
+                Join with a Team Code
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Input
+                placeholder="5-character code (e.g. A3K7P)"
+                value={joinCode}
+                maxLength={5}
+                className="uppercase tracking-widest font-mono"
+                onChange={(e) => {
+                  setJoinCode(e.target.value.toUpperCase());
+                  setJoinError("");
+                }}
+                onKeyDown={(e) => e.key === "Enter" && handleJoinByCode()}
+              />
+              <Button
+                className="w-full bg-green-600 hover:bg-green-700 gap-2"
+                onClick={handleJoinByCode}
+                disabled={joiningTeam}
+              >
+                {joiningTeam ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <CheckCircle className="w-4 h-4" />
+                )}
+                Join Team
+              </Button>
+              {joinError && <p className="text-sm text-red-600">{joinError}</p>}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
   // ── Pending invite screen ──────────────────────────────────────────────────
   if (hasPendingInvite) {
     return (
@@ -208,9 +367,76 @@ export default function Team() {
                     </p>
                   </div>
                 </div>
+
+                {/* Warning: owner with other members — ownership will be transferred */}
+                {team.__isOwner && team.__ownedTeamMemberCount > 0 && (
+                  <div className="flex items-start gap-2 px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+                    <LogOut className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <p className="text-sm text-amber-800">
+                      <span className="font-semibold">Heads up:</span> You own{" "}
+                      <span className="font-semibold">
+                        {team.__currentTeamName}
+                      </span>
+                      . Accepting will transfer ownership to the next member and
+                      add you to{" "}
+                      <span className="font-semibold">
+                        {invite.teams?.name ?? "the new team"}
+                      </span>
+                      .
+                    </p>
+                  </div>
+                )}
+
+                {/* Warning: owner with no other members — team will be deleted */}
+                {team.__isOwner &&
+                  team.__ownedTeamMemberCount === 0 &&
+                  team.__currentTeamName && (
+                    <div className="flex items-start gap-2 px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+                      <LogOut className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                      <p className="text-sm text-amber-800">
+                        <span className="font-semibold">Heads up:</span> You own{" "}
+                        <span className="font-semibold">
+                          {team.__currentTeamName}
+                        </span>
+                        . Since it has no other members, accepting will{" "}
+                        <span className="font-semibold">
+                          permanently delete
+                        </span>{" "}
+                        that team and add you to{" "}
+                        <span className="font-semibold">
+                          {invite.teams?.name ?? "the new team"}
+                        </span>
+                        .
+                      </p>
+                    </div>
+                  )}
+
+                {/* Warning: active member of another team */}
+                {!team.__isOwner && team.__currentTeamName && (
+                  <div className="flex items-start gap-2 px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+                    <LogOut className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <p className="text-sm text-amber-800">
+                      <span className="font-semibold">Heads up:</span> You're
+                      currently in{" "}
+                      <span className="font-semibold">
+                        {team.__currentTeamName}
+                      </span>
+                      . Accepting will remove you from that team and add you to{" "}
+                      <span className="font-semibold">
+                        {invite.teams?.name ?? "the new team"}
+                      </span>
+                      .
+                    </p>
+                  </div>
+                )}
+
                 <div className="flex gap-3">
                   <Button
-                    className="flex-1 bg-blue-600 hover:bg-blue-700 gap-2"
+                    className={`flex-1 gap-2 ${
+                      team.__currentTeamName
+                        ? "bg-amber-600 hover:bg-amber-700"
+                        : "bg-blue-600 hover:bg-blue-700"
+                    }`}
                     onClick={handleAcceptInvite}
                     disabled={isAccepting}
                   >
@@ -219,7 +445,11 @@ export default function Team() {
                     ) : (
                       <CheckCircle className="w-4 h-4" />
                     )}
-                    Accept & Join
+                    {team.__isOwner && team.__ownedTeamMemberCount > 0
+                      ? "Transfer Ownership & Join"
+                      : team.__currentTeamName
+                        ? "Leave & Join New Team"
+                        : "Accept & Join"}
                   </Button>
                   <Button
                     variant="outline"
@@ -258,10 +488,27 @@ export default function Team() {
           <div className="p-3 bg-green-100 rounded-lg">
             <Users className="w-6 h-6 text-green-600" />
           </div>
-          <div>
+          <div className="flex-1 min-w-0">
             <h1 className="text-3xl font-bold text-slate-900">{team?.name}</h1>
             <p className="text-slate-600 mt-1">Shared bills and team members</p>
           </div>
+          {team?.team_code && (
+            <button
+              onClick={handleCopyCode}
+              title="Click to copy team code"
+              className="flex flex-col items-center gap-1 px-4 py-2.5 bg-white border border-slate-200 rounded-xl hover:border-slate-300 hover:bg-slate-50 transition-colors group"
+            >
+              <span className="text-xs text-slate-400 group-hover:text-slate-500 uppercase tracking-wide">
+                Team Code
+              </span>
+              <span className="font-mono font-bold text-lg tracking-widest text-slate-800">
+                {team.team_code}
+              </span>
+              <span className="text-[10px] text-slate-400">
+                {codeCopied ? "✓ Copied!" : "Click to copy"}
+              </span>
+            </button>
+          )}
         </div>
 
         {/* Members */}
@@ -324,19 +571,17 @@ export default function Team() {
               )}
             </div>
 
-            {/* Leave team (members only) */}
-            {!isOwner && (
-              <div className="pt-3 border-t border-slate-200">
-                <Button
-                  variant="outline"
-                  className="gap-2 text-red-600 border-red-200 hover:bg-red-50"
-                  onClick={handleLeaveTeam}
-                >
-                  <LogOut className="w-4 h-4" />
-                  Leave Team
-                </Button>
-              </div>
-            )}
+            {/* Leave team */}
+            <div className="pt-3 border-t border-slate-200">
+              <Button
+                variant="outline"
+                className="gap-2 text-red-600 border-red-200 hover:bg-red-50"
+                onClick={handleLeaveTeam}
+              >
+                <LogOut className="w-4 h-4" />
+                {isOwner ? "Leave & Transfer Ownership" : "Leave Team"}
+              </Button>
+            </div>
 
             {/* Invite form (owner only) */}
             {isOwner && (

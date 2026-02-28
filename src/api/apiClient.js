@@ -340,7 +340,49 @@ export const api = {
         if (pendingErr)
           console.error("[Team] get_my_pending_invites error:", pendingErr);
         if (pending && pending.length > 0) {
-          return { __pendingInvite: true };
+          // Detect current team situation so the UI can show the right warning
+          // Check member role first
+          const { data: currentMembership } = await supabase
+            .from("team_members")
+            .select("team_id, teams(name)")
+            .eq("user_id", userId)
+            .eq("status", "active")
+            .eq("role", "member")
+            .maybeSingle();
+          if (currentMembership?.teams?.name) {
+            return {
+              __pendingInvite: true,
+              __currentTeamName: currentMembership.teams.name,
+              __isOwner: false,
+              __ownedTeamMemberCount: 0,
+            };
+          }
+          // Check owner role
+          const { data: ownedTeam } = await supabase
+            .from("teams")
+            .select("id, name")
+            .eq("created_by", userId)
+            .maybeSingle();
+          if (ownedTeam) {
+            const { count } = await supabase
+              .from("team_members")
+              .select("id", { count: "exact", head: true })
+              .eq("team_id", ownedTeam.id)
+              .eq("status", "active")
+              .eq("role", "member");
+            return {
+              __pendingInvite: true,
+              __currentTeamName: ownedTeam.name,
+              __isOwner: true,
+              __ownedTeamMemberCount: count ?? 0,
+            };
+          }
+          return {
+            __pendingInvite: true,
+            __currentTeamName: null,
+            __isOwner: false,
+            __ownedTeamMemberCount: 0,
+          };
         }
 
         // Check if user is an active MEMBER of someone else's team (invited)
@@ -382,6 +424,112 @@ export const api = {
           status: "active",
         });
         return newTeam;
+      },
+
+      // Like getOrCreate but returns null instead of auto-creating.
+      // Used by the Team page so leaving a team shows "no team" rather than
+      // immediately spawning a new one.
+      async get() {
+        const userId = await getUserId();
+
+        const { data: pending } = await supabase.rpc("get_my_pending_invites");
+        if (pending && pending.length > 0) {
+          const { data: currentMembership } = await supabase
+            .from("team_members")
+            .select("team_id, teams(name)")
+            .eq("user_id", userId)
+            .eq("status", "active")
+            .eq("role", "member")
+            .maybeSingle();
+          if (currentMembership?.teams?.name) {
+            return {
+              __pendingInvite: true,
+              __currentTeamName: currentMembership.teams.name,
+              __isOwner: false,
+              __ownedTeamMemberCount: 0,
+            };
+          }
+          const { data: ownedTeam } = await supabase
+            .from("teams")
+            .select("id, name")
+            .eq("created_by", userId)
+            .maybeSingle();
+          if (ownedTeam) {
+            const { count } = await supabase
+              .from("team_members")
+              .select("id", { count: "exact", head: true })
+              .eq("team_id", ownedTeam.id)
+              .eq("status", "active")
+              .eq("role", "member");
+            return {
+              __pendingInvite: true,
+              __currentTeamName: ownedTeam.name,
+              __isOwner: true,
+              __ownedTeamMemberCount: count ?? 0,
+            };
+          }
+          return {
+            __pendingInvite: true,
+            __currentTeamName: null,
+            __isOwner: false,
+            __ownedTeamMemberCount: 0,
+          };
+        }
+
+        const { data: membership } = await supabase
+          .from("team_members")
+          .select("team_id, teams(*)")
+          .eq("user_id", userId)
+          .eq("status", "active")
+          .eq("role", "member")
+          .maybeSingle();
+        if (membership?.teams) return membership.teams;
+
+        const { data: owned } = await supabase
+          .from("teams")
+          .select("*")
+          .eq("created_by", userId)
+          .maybeSingle();
+        if (owned) return owned;
+
+        return null; // no team — caller decides what to do
+      },
+
+      async createTeam(name) {
+        const userId = await getUserId();
+        const { data: sessionData } = await supabase.auth.getSession();
+        const email = sessionData?.session?.user?.email ?? "";
+        if (!name || !name.trim()) throw new Error("Team name is required.");
+        const teamName = name.trim();
+        const { data: newTeam, error } = await supabase
+          .from("teams")
+          .insert({ name: teamName, created_by: userId })
+          .select()
+          .single();
+        if (error) throw error;
+        await supabase.from("team_members").insert({
+          team_id: newTeam.id,
+          user_id: userId,
+          email,
+          role: "owner",
+          status: "active",
+        });
+        return newTeam;
+      },
+
+      async joinByCode(code) {
+        const { data, error } = await supabase.rpc("join_team_by_code", {
+          p_code: (code ?? "").trim().toUpperCase(),
+        });
+        if (error) throw error;
+        // Return the full team object
+        const { data: team, error: teamErr } = await supabase
+          .from("teams")
+          .select("*")
+          .eq("id", data)
+          .single();
+        if (teamErr) throw teamErr;
+        return team;
       },
 
       async acceptPendingInvites() {

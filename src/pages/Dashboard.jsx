@@ -43,8 +43,8 @@ export default function Dashboard() {
   const { data: team } = useQuery({
     queryKey: ["team"],
     queryFn: () =>
-      api.entities.Team.getOrCreate().catch((err) => {
-        console.error("[Team] getOrCreate failed:", err?.message, err);
+      api.entities.Team.get().catch((err) => {
+        console.error("[Team] get failed:", err?.message, err);
         return null;
       }),
     staleTime: 0,
