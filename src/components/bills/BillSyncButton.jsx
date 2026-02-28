@@ -98,7 +98,6 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
       if (syncStatus?.maintenance) return;
       syncBillsFromWebsite();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoSync, syncStatus?.maintenance]);
 
   return (
