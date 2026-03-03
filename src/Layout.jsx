@@ -14,6 +14,7 @@ import {
   Settings,
   LogOut,
   Users,
+  CalendarDays,
 } from "lucide-react";
 import {
   Sidebar,
@@ -49,6 +50,12 @@ const navigationItems = [
     url: createPageUrl("Team"),
     icon: Users,
     description: "Shared Bills with Your Team",
+  },
+  {
+    title: "Calendar",
+    url: createPageUrl("Calendar"),
+    icon: CalendarDays,
+    description: "Events & Schedule",
   },
   {
     title: "Twitter Feed",

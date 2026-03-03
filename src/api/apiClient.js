@@ -940,6 +940,63 @@ export const api = {
     },
   },
 
+  // ─── Calendar Events ────────────────────────────────────────────────────────
+  calendarEvents: {
+    /** List events in a date range */
+    async list(startDate, endDate) {
+      const userId = await getUserId();
+      let query = supabase
+        .from("calendar_events")
+        .select("*")
+        .eq("user_id", userId)
+        .order("start_time", { ascending: true });
+
+      if (startDate) query = query.gte("start_time", startDate);
+      if (endDate) query = query.lte("start_time", endDate);
+
+      const { data, error } = await query;
+      if (error) throw error;
+      return data ?? [];
+    },
+
+    /** Create a new event */
+    async create(event) {
+      const userId = await getUserId();
+      const { data, error } = await supabase
+        .from("calendar_events")
+        .insert({ ...event, user_id: userId })
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    },
+
+    /** Update an existing event */
+    async update(id, patch) {
+      const userId = await getUserId();
+      const { data, error } = await supabase
+        .from("calendar_events")
+        .update(patch)
+        .eq("id", id)
+        .eq("user_id", userId)
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    },
+
+    /** Delete an event */
+    async delete(id) {
+      const userId = await getUserId();
+      const { error } = await supabase
+        .from("calendar_events")
+        .delete()
+        .eq("id", id)
+        .eq("user_id", userId);
+      if (error) throw error;
+    },
+  },
+
   // ─── App Logs ──────────────────────────────────────────────────────────────
   appLogs: {
     async logUserInApp(pageName) {
