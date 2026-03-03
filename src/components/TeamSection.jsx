@@ -126,7 +126,14 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
 
   // ── Unread chat messages ─────────────────────────────────────────────────
   const chatCacheKey = ["teamChat", teamId, authUser?.id];
-  const cachedMessages = queryClient.getQueryData(chatCacheKey) ?? [];
+  const { data: cachedMessages = [] } = useQuery({
+    queryKey: chatCacheKey,
+    queryFn: () => api.entities.TeamChat.getMessages(teamId),
+    enabled: !!teamId && !!authUser?.id,
+    staleTime: Infinity, // don't refetch — TeamChat manages this
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+  });
   const [lastChatRead, setLastChatRead] = useState(
     () => localStorage.getItem(`team-chat-read-${teamId}`) || null,
   );
@@ -149,14 +156,6 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
       setLastChatRead(now);
     }
   }, [teamOpen, cachedMessages.length, teamId]);
-
-  // Re-check cache periodically (realtime messages update the cache)
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    if (teamOpen) return; // no need to tick when open (already read)
-    const iv = setInterval(() => setTick((t) => t + 1), 3000);
-    return () => clearInterval(iv);
-  }, [teamOpen]);
 
   // Initialize lastChatRead on first mount if not set
   useEffect(() => {
