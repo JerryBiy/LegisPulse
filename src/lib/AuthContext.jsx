@@ -93,7 +93,11 @@ export const AuthProvider = ({ children }) => {
     await supabase.auth.signOut();
     setUser(null);
     setIsAuthenticated(false);
+    // Clear persisted team-page preferences so they reset to defaults on next login
     if (typeof window !== "undefined") {
+      localStorage.removeItem("team-members-open");
+      localStorage.removeItem("team-bills-open");
+      sessionStorage.removeItem("team-scroll-y");
       window.location.href = "/login";
     }
   };

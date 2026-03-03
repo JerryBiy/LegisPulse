@@ -8,6 +8,14 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   User,
   Calendar,
@@ -19,6 +27,10 @@ import {
   Sparkles,
   BookOpen,
   Users,
+  Shield,
+  AlertTriangle,
+  StickyNote,
+  UserCheck,
 } from "lucide-react";
 import { format } from "date-fns";
 import { api } from "@/api/apiClient";
@@ -126,6 +138,11 @@ export default function BillDetailsModal({
   onBillUpdate,
   isInTeam,
   onAddToTeam,
+  teamMeta,
+  onTeamMetaChange,
+  teamMembers,
+  personalMeta,
+  onPersonalMetaChange,
 }) {
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [generatedSummary, setGeneratedSummary] = useState(null);
@@ -259,6 +276,8 @@ export default function BillDetailsModal({
   const safeBillChanges = formatAiText(bill.changes_analysis);
 
   const generateAISummary = async () => {
+    // Guard against double-clicks or concurrent invocations.
+    if (isGeneratingSummary) return;
     setIsGeneratingSummary(true);
     setAiError("");
     try {
@@ -283,7 +302,9 @@ export default function BillDetailsModal({
         );
       }
 
+      // Trim context and release the full string reference to free memory.
       const aiContext = billTextContext.slice(0, 30000);
+      billTextContext = null;
 
       const prompt = `You are analyzing Georgia legislative bill ${bill.bill_number} titled "${bill.title}".
 
@@ -327,7 +348,7 @@ export default function BillDetailsModal({
       );
       console.log(
         "Bill text context truncated to 30000",
-        billTextContext.length > 30000,
+        aiContext.length >= 30000,
       );
       console.log("Prompt length", prompt.length);
       console.log("Prompt preview (start)", prompt.slice(0, 2000));
@@ -565,6 +586,161 @@ export default function BillDetailsModal({
                 </CardContent>
               </Card>
             )}
+
+          {/* Team Notes — only when opened from team context */}
+          {teamMeta && onTeamMetaChange && (
+            <Card className="border-indigo-200 bg-indigo-50/30">
+              <CardHeader>
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <StickyNote className="w-5 h-5 text-indigo-500" />
+                  Team Notes
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {/* Flag */}
+                <div className="flex items-center gap-3">
+                  <label className="text-sm font-medium text-slate-700 w-32 shrink-0">
+                    Risk Flag
+                  </label>
+                  <Select
+                    value={teamMeta.flag || "_none"}
+                    onValueChange={(val) =>
+                      onTeamMetaChange({ flag: val === "_none" ? null : val })
+                    }
+                  >
+                    <SelectTrigger className="h-9 w-[160px]">
+                      <SelectValue placeholder="None" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_none">
+                        <span className="text-slate-400">None</span>
+                      </SelectItem>
+                      <SelectItem value="low">
+                        <span className="flex items-center gap-1 text-green-700">
+                          <Shield className="w-3 h-3" /> Low Risk
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="high">
+                        <span className="flex items-center gap-1 text-red-700">
+                          <AlertTriangle className="w-3 h-3" /> High Risk
+                        </span>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {/* Policy Assistant */}
+                {teamMembers && teamMembers.length > 0 && (
+                  <div className="flex items-center gap-3">
+                    <label className="text-sm font-medium text-slate-700 w-32 shrink-0">
+                      Policy Assistant
+                    </label>
+                    <Select
+                      value={teamMeta.policy_assistant || "_none"}
+                      onValueChange={(val) =>
+                        onTeamMetaChange({
+                          policy_assistant: val === "_none" ? null : val,
+                        })
+                      }
+                    >
+                      <SelectTrigger className="h-9 w-[220px]">
+                        <SelectValue placeholder="Unassigned" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="_none">
+                          <span className="text-slate-400">Unassigned</span>
+                        </SelectItem>
+                        {teamMembers.map((m) => (
+                          <SelectItem key={m.user_id} value={m.user_id}>
+                            {m.email}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+
+                {/* Bill Summary Notes */}
+                <div>
+                  <label className="text-sm font-medium text-slate-700 block mb-1">
+                    Bill Summary Notes
+                  </label>
+                  <Textarea
+                    placeholder="Add team notes about this bill..."
+                    className="min-h-[100px] resize-y"
+                    defaultValue={teamMeta.bill_summary_notes || ""}
+                    onBlur={(e) =>
+                      onTeamMetaChange({ bill_summary_notes: e.target.value })
+                    }
+                  />
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Personal Notes — only when opened from tracked bills context */}
+          {personalMeta && onPersonalMetaChange && (
+            <Card className="border-blue-200 bg-blue-50/30">
+              <CardHeader>
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <StickyNote className="w-5 h-5 text-blue-500" />
+                  My Notes
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {/* Flag */}
+                <div className="flex items-center gap-3">
+                  <label className="text-sm font-medium text-slate-700 w-32 shrink-0">
+                    Risk Flag
+                  </label>
+                  <Select
+                    value={personalMeta.flag || "_none"}
+                    onValueChange={(val) =>
+                      onPersonalMetaChange({
+                        flag: val === "_none" ? null : val,
+                      })
+                    }
+                  >
+                    <SelectTrigger className="h-9 w-[160px]">
+                      <SelectValue placeholder="None" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_none">
+                        <span className="text-slate-400">None</span>
+                      </SelectItem>
+                      <SelectItem value="low">
+                        <span className="flex items-center gap-1 text-green-700">
+                          <Shield className="w-3 h-3" /> Low Risk
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="high">
+                        <span className="flex items-center gap-1 text-red-700">
+                          <AlertTriangle className="w-3 h-3" /> High Risk
+                        </span>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {/* Bill Summary Notes */}
+                <div>
+                  <label className="text-sm font-medium text-slate-700 block mb-1">
+                    Bill Summary Notes
+                  </label>
+                  <Textarea
+                    placeholder="Add your personal notes about this bill..."
+                    className="min-h-[100px] resize-y"
+                    defaultValue={personalMeta.bill_summary_notes || ""}
+                    onBlur={(e) =>
+                      onPersonalMetaChange({
+                        bill_summary_notes: e.target.value,
+                      })
+                    }
+                  />
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {/* AI Summary Section */}
           <Card>

@@ -326,6 +326,44 @@ export const api = {
       },
     },
 
+    /** Personal bill metadata (flag + notes, per-user, separate from team). */
+    UserBillMeta: {
+      /** Fetch all personal metadata rows for the current user. Returns map keyed by bill_number. */
+      async getAll() {
+        const userId = await getUserId();
+        const { data, error } = await supabase
+          .from("user_bill_metadata")
+          .select("bill_number, flag, bill_summary_notes")
+          .eq("user_id", userId);
+        if (error) throw error;
+        const map = {};
+        for (const row of data ?? []) {
+          map[row.bill_number] = {
+            flag: row.flag ?? null,
+            bill_summary_notes: row.bill_summary_notes ?? "",
+          };
+        }
+        return map;
+      },
+
+      /** Upsert metadata for a specific bill. */
+      async update(billNumber, fields) {
+        const userId = await getUserId();
+        const { error } = await supabase
+          .from("user_bill_metadata")
+          .upsert(
+            {
+              user_id: userId,
+              bill_number: billNumber,
+              ...fields,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: "user_id,bill_number" },
+          );
+        if (error) throw error;
+      },
+    },
+
     Team: {
       async getOrCreate() {
         const userId = await getUserId();
@@ -623,6 +661,35 @@ export const api = {
         const { error } = await supabase
           .from("team_bills")
           .delete()
+          .eq("team_id", teamId)
+          .eq("bill_number", billNumber);
+        if (error) throw error;
+      },
+
+      /** Fetch all team_bills rows with metadata (flag, policy_assistant, notes). */
+      async getBillMetadata(teamId) {
+        const { data, error } = await supabase
+          .from("team_bills")
+          .select("bill_number, flag, policy_assistant, bill_summary_notes")
+          .eq("team_id", teamId);
+        if (error) throw error;
+        // Return a map keyed by bill_number for fast lookup.
+        const map = {};
+        for (const row of data ?? []) {
+          map[row.bill_number] = {
+            flag: row.flag ?? null,
+            policy_assistant: row.policy_assistant ?? null,
+            bill_summary_notes: row.bill_summary_notes ?? "",
+          };
+        }
+        return map;
+      },
+
+      /** Update metadata on a single team bill row. `fields` can contain flag, policy_assistant, bill_summary_notes. */
+      async updateBillMetadata(teamId, billNumber, fields) {
+        const { error } = await supabase
+          .from("team_bills")
+          .update(fields)
           .eq("team_id", teamId)
           .eq("bill_number", billNumber);
         if (error) throw error;

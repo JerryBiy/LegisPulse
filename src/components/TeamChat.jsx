@@ -18,6 +18,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useResizableHeight, ResizeHandle } from "@/hooks/use-resizable-height";
 import data from "@emoji-mart/data";
 import Picker from "@emoji-mart/react";
 
@@ -194,7 +195,6 @@ function PendingAttachment({ file, onRemove }) {
 export default function TeamChat({ teamId }) {
   const { user: authUser } = useAuth();
   const queryClient = useQueryClient();
-  const bottomRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const dropZoneRef = useRef(null);
@@ -248,10 +248,24 @@ export default function TeamChat({ teamId }) {
     };
   }, [teamId, authUser?.id, queryClient]);
 
-  // ── Auto-scroll ───────────────────────────────────────────────────────────
+  // ── Resizable height ─────────────────────────────────────────────
+  const {
+    height: chatHeight,
+    collapsed: chatCollapsed,
+    onMouseDown: onResizeMouseDown,
+    toggle: toggleChatCollapse,
+  } = useResizableHeight({
+    storageKey: "team-chat-height",
+    defaultHeight: 520,
+    minHeight: 200,
+  });
+
+  // ── Auto-scroll (within chat container only — never steals page focus) ───
+  const chatContainerRef = useRef(null);
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
+    const el = chatContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length, chatHeight]);
 
   // ── File handling ─────────────────────────────────────────────────────────
   const handleFileSelect = useCallback((file) => {
@@ -391,227 +405,238 @@ export default function TeamChat({ teamId }) {
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <Card
-      className="flex flex-col relative"
-      style={{ height: "520px" }}
-      ref={dropZoneRef}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-    >
-      {/* Drag overlay */}
-      {isDragging && (
-        <div className="absolute inset-0 z-50 bg-indigo-50/90 border-2 border-dashed border-indigo-400 rounded-xl flex flex-col items-center justify-center pointer-events-none">
-          <ImageIcon className="w-10 h-10 text-indigo-500 mb-2" />
-          <p className="text-indigo-600 font-medium text-sm">
-            Drop file to attach
-          </p>
-        </div>
-      )}
-
-      <CardHeader className="pb-3 border-b border-slate-200 shrink-0">
-        <CardTitle className="flex items-center gap-2 text-base">
-          <MessageCircle className="w-5 h-5 text-indigo-500" />
-          Team Chat
-          <span className="ml-auto flex items-center gap-1 text-xs font-normal text-slate-400">
-            <Info className="w-3.5 h-3.5" />
-            Messages expire after 2½ weeks
-          </span>
-        </CardTitle>
-      </CardHeader>
-
-      {/* Message list */}
-      <CardContent className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0">
-        {isLoading && (
-          <div className="flex justify-center py-8">
-            <div className="w-6 h-6 border-4 border-slate-200 border-t-indigo-500 rounded-full animate-spin" />
-          </div>
-        )}
-
-        {!isLoading && messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-center py-8">
-            <MessageCircle className="w-10 h-10 text-slate-300 mb-3" />
-            <p className="text-slate-400 text-sm">No messages yet.</p>
-            <p className="text-slate-400 text-xs mt-1">
-              Start a conversation with your team!
+    <div>
+      <Card
+        className="flex flex-col relative"
+        style={{ height: chatCollapsed ? "auto" : `${chatHeight}px` }}
+        ref={dropZoneRef}
+        onDragOver={chatCollapsed ? undefined : handleDragOver}
+        onDragLeave={chatCollapsed ? undefined : handleDragLeave}
+        onDrop={chatCollapsed ? undefined : handleDrop}
+      >
+        {/* Drag overlay */}
+        {isDragging && (
+          <div className="absolute inset-0 z-50 bg-indigo-50/90 border-2 border-dashed border-indigo-400 rounded-xl flex flex-col items-center justify-center pointer-events-none">
+            <ImageIcon className="w-10 h-10 text-indigo-500 mb-2" />
+            <p className="text-indigo-600 font-medium text-sm">
+              Drop file to attach
             </p>
           </div>
         )}
 
-        {messages.map((msg, idx) => {
-          const isOwn = msg.user_id === authUser?.id;
-          const showHeader =
-            idx === 0 || messages[idx - 1]?.user_id !== msg.user_id;
-          const deletable = isOwn && !msg._optimistic && canDelete(msg);
+        <CardHeader
+          className={`pb-3 border-b border-slate-200 shrink-0 ${chatCollapsed ? "cursor-pointer hover:bg-slate-50 transition-colors" : ""}`}
+          onClick={chatCollapsed ? toggleChatCollapse : undefined}
+        >
+          <CardTitle className="flex items-center gap-2 text-base">
+            <MessageCircle className="w-5 h-5 text-indigo-500" />
+            Team Chat
+            <span className="ml-auto flex items-center gap-1 text-xs font-normal text-slate-400">
+              <Info className="w-3.5 h-3.5" />
+              Messages expire after 2½ weeks
+            </span>
+          </CardTitle>
+        </CardHeader>
 
-          return (
-            <div
-              key={msg.id}
-              className={`flex gap-2.5 group ${isOwn ? "flex-row-reverse" : ""}`}
+        {!chatCollapsed && (
+          <>
+            {/* Message list */}
+            <CardContent
+              ref={chatContainerRef}
+              className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0"
             >
-              {/* Avatar */}
-              <div className="w-8 shrink-0">
-                {showHeader && (
-                  <div
-                    className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold ${avatarColour(msg.user_id)}`}
-                  >
-                    {initials(msg)}
-                  </div>
-                )}
-              </div>
-
-              {/* Bubble + meta */}
-              <div
-                className={`max-w-[72%] space-y-0.5 ${isOwn ? "items-end" : "items-start"} flex flex-col`}
-              >
-                {showHeader && (
-                  <div
-                    className={`flex items-baseline gap-2 text-xs text-slate-500 ${isOwn ? "flex-row-reverse" : ""}`}
-                  >
-                    <span className="font-medium text-slate-700">
-                      {isOwn ? "You" : senderName(msg)}
-                    </span>
-                    <span>{formatTime(msg.created_at)}</span>
-                  </div>
-                )}
-
-                <div
-                  className={`flex items-end gap-1.5 ${isOwn ? "flex-row-reverse" : ""}`}
-                >
-                  <div className="space-y-1.5">
-                    {/* Attachment */}
-                    {msg.attachment_url && (
-                      <AttachmentBubble msg={msg} isOwn={isOwn} />
-                    )}
-
-                    {/* Text bubble */}
-                    {msg.message && (
-                      <div
-                        className={`px-3 py-2 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${
-                          isOwn
-                            ? "bg-indigo-600 text-white rounded-tr-sm"
-                            : "bg-slate-100 text-slate-900 rounded-tl-sm"
-                        } ${msg._optimistic ? "opacity-70" : ""}`}
-                      >
-                        {msg.message}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Delete — only within 2 minutes */}
-                  {deletable && (
-                    <button
-                      onClick={() => handleDelete(msg.id)}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-slate-400 hover:text-red-500 hover:bg-red-50"
-                      title="Delete message (within 2 min)"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  )}
+              {isLoading && (
+                <div className="flex justify-center py-8">
+                  <div className="w-6 h-6 border-4 border-slate-200 border-t-indigo-500 rounded-full animate-spin" />
                 </div>
+              )}
 
-                {!showHeader && (
-                  <span
-                    className={`text-[10px] text-slate-400 ${isOwn ? "text-right" : ""}`}
+              {!isLoading && messages.length === 0 && (
+                <div className="flex flex-col items-center justify-center h-full text-center py-8">
+                  <MessageCircle className="w-10 h-10 text-slate-300 mb-3" />
+                  <p className="text-slate-400 text-sm">No messages yet.</p>
+                  <p className="text-slate-400 text-xs mt-1">
+                    Start a conversation with your team!
+                  </p>
+                </div>
+              )}
+
+              {messages.map((msg, idx) => {
+                const isOwn = msg.user_id === authUser?.id;
+                const showHeader =
+                  idx === 0 || messages[idx - 1]?.user_id !== msg.user_id;
+                const deletable = isOwn && !msg._optimistic && canDelete(msg);
+
+                return (
+                  <div
+                    key={msg.id}
+                    className={`flex gap-2.5 group ${isOwn ? "flex-row-reverse" : ""}`}
                   >
-                    {formatTime(msg.created_at)}
-                  </span>
-                )}
+                    {/* Avatar */}
+                    <div className="w-8 shrink-0">
+                      {showHeader && (
+                        <div
+                          className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold ${avatarColour(msg.user_id)}`}
+                        >
+                          {initials(msg)}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Bubble + meta */}
+                    <div
+                      className={`max-w-[72%] space-y-0.5 ${isOwn ? "items-end" : "items-start"} flex flex-col`}
+                    >
+                      {showHeader && (
+                        <div
+                          className={`flex items-baseline gap-2 text-xs text-slate-500 ${isOwn ? "flex-row-reverse" : ""}`}
+                        >
+                          <span className="font-medium text-slate-700">
+                            {isOwn ? "You" : senderName(msg)}
+                          </span>
+                          <span>{formatTime(msg.created_at)}</span>
+                        </div>
+                      )}
+
+                      <div
+                        className={`flex items-end gap-1.5 ${isOwn ? "flex-row-reverse" : ""}`}
+                      >
+                        <div className="space-y-1.5">
+                          {/* Attachment */}
+                          {msg.attachment_url && (
+                            <AttachmentBubble msg={msg} isOwn={isOwn} />
+                          )}
+
+                          {/* Text bubble */}
+                          {msg.message && (
+                            <div
+                              className={`px-3 py-2 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${
+                                isOwn
+                                  ? "bg-indigo-600 text-white rounded-tr-sm"
+                                  : "bg-slate-100 text-slate-900 rounded-tl-sm"
+                              } ${msg._optimistic ? "opacity-70" : ""}`}
+                            >
+                              {msg.message}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Delete — only within 2 minutes */}
+                        {deletable && (
+                          <button
+                            onClick={() => handleDelete(msg.id)}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-slate-400 hover:text-red-500 hover:bg-red-50"
+                            title="Delete message (within 2 min)"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+
+                      {!showHeader && (
+                        <span
+                          className={`text-[10px] text-slate-400 ${isOwn ? "text-right" : ""}`}
+                        >
+                          {formatTime(msg.created_at)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </CardContent>
+
+            {/* Input area */}
+            <div className="shrink-0 border-t border-slate-200 px-4 py-3 space-y-2">
+              {sendError && <p className="text-xs text-red-600">{sendError}</p>}
+
+              {/* Pending file preview */}
+              {pendingFile && (
+                <PendingAttachment
+                  file={pendingFile}
+                  onRemove={() => setPendingFile(null)}
+                />
+              )}
+
+              {/* Emoji picker */}
+              {showEmoji && (
+                <div ref={emojiRef} className="absolute bottom-20 left-4 z-50">
+                  <Picker
+                    data={data}
+                    onEmojiSelect={onEmojiSelect}
+                    theme="light"
+                    previewPosition="none"
+                    skinTonePosition="none"
+                    maxFrequentRows={2}
+                  />
+                </div>
+              )}
+
+              <div className="flex gap-2 items-end">
+                {/* Emoji toggle */}
+                <button
+                  type="button"
+                  onClick={() => setShowEmoji((s) => !s)}
+                  className={`p-2 rounded-lg transition-colors ${
+                    showEmoji
+                      ? "bg-indigo-100 text-indigo-600"
+                      : "text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                  }`}
+                  title="Emoji"
+                >
+                  <Smile className="w-5 h-5" />
+                </button>
+
+                {/* File attach */}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+                  title="Attach file or image"
+                >
+                  <Paperclip className="w-5 h-5" />
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="hidden"
+                  onChange={onFileInputChange}
+                  accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.zip,.json"
+                />
+
+                {/* Text input */}
+                <Textarea
+                  ref={textareaRef}
+                  value={draft}
+                  onChange={(e) => {
+                    setDraft(e.target.value);
+                    setSendError("");
+                  }}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Type a message… (Enter to send)"
+                  className="flex-1 min-h-[40px] max-h-[120px] resize-none text-sm"
+                  rows={1}
+                />
+
+                {/* Send */}
+                <Button
+                  onClick={handleSend}
+                  disabled={(!draft.trim() && !pendingFile) || sending}
+                  size="icon"
+                  className="bg-indigo-600 hover:bg-indigo-700 h-10 w-10 shrink-0"
+                >
+                  {sending ? (
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <Send className="w-4 h-4" />
+                  )}
+                </Button>
               </div>
             </div>
-          );
-        })}
-
-        <div ref={bottomRef} />
-      </CardContent>
-
-      {/* Input area */}
-      <div className="shrink-0 border-t border-slate-200 px-4 py-3 space-y-2">
-        {sendError && <p className="text-xs text-red-600">{sendError}</p>}
-
-        {/* Pending file preview */}
-        {pendingFile && (
-          <PendingAttachment
-            file={pendingFile}
-            onRemove={() => setPendingFile(null)}
-          />
+          </>
         )}
-
-        {/* Emoji picker */}
-        {showEmoji && (
-          <div ref={emojiRef} className="absolute bottom-20 left-4 z-50">
-            <Picker
-              data={data}
-              onEmojiSelect={onEmojiSelect}
-              theme="light"
-              previewPosition="none"
-              skinTonePosition="none"
-              maxFrequentRows={2}
-            />
-          </div>
-        )}
-
-        <div className="flex gap-2 items-end">
-          {/* Emoji toggle */}
-          <button
-            type="button"
-            onClick={() => setShowEmoji((s) => !s)}
-            className={`p-2 rounded-lg transition-colors ${
-              showEmoji
-                ? "bg-indigo-100 text-indigo-600"
-                : "text-slate-400 hover:text-slate-600 hover:bg-slate-100"
-            }`}
-            title="Emoji"
-          >
-            <Smile className="w-5 h-5" />
-          </button>
-
-          {/* File attach */}
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
-            title="Attach file or image"
-          >
-            <Paperclip className="w-5 h-5" />
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            className="hidden"
-            onChange={onFileInputChange}
-            accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.zip,.json"
-          />
-
-          {/* Text input */}
-          <Textarea
-            ref={textareaRef}
-            value={draft}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              setSendError("");
-            }}
-            onKeyDown={handleKeyDown}
-            placeholder="Type a message… (Enter to send)"
-            className="flex-1 min-h-[40px] max-h-[120px] resize-none text-sm"
-            rows={1}
-          />
-
-          {/* Send */}
-          <Button
-            onClick={handleSend}
-            disabled={(!draft.trim() && !pendingFile) || sending}
-            size="icon"
-            className="bg-indigo-600 hover:bg-indigo-700 h-10 w-10 shrink-0"
-          >
-            {sending ? (
-              <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-            ) : (
-              <Send className="w-4 h-4" />
-            )}
-          </Button>
-        </div>
-      </div>
-    </Card>
+      </Card>
+      <ResizeHandle onMouseDown={onResizeMouseDown} />
+    </div>
   );
 }

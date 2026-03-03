@@ -1,4 +1,10 @@
-import React, { useState } from "react";
+import React, {
+  useState,
+  useCallback,
+  useMemo,
+  useEffect,
+  useRef,
+} from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/apiClient";
 import { useAuth } from "@/lib/AuthContext";
@@ -13,14 +19,55 @@ import {
   XCircle,
   LogOut,
   Hash,
+  ChevronDown,
+  LayoutGrid,
+  List,
+  ExternalLink,
+  AlertTriangle,
+  Shield,
+  Sparkles,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+  Maximize2,
+  Minimize2,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Collapsible,
+  CollapsibleTrigger,
+  CollapsibleContent,
+} from "@/components/ui/collapsible";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import BillCard from "@/components/bills/BillCard";
 import BillDetailsModal from "@/components/bills/BillDetailsModal";
 import TeamChat from "@/components/TeamChat";
+import { useResizableHeight, ResizeHandle } from "@/hooks/use-resizable-height";
 
 export default function Team() {
   const queryClient = useQueryClient();
@@ -35,6 +82,78 @@ export default function Team() {
   const [joiningTeam, setJoiningTeam] = useState(false);
   const [joinError, setJoinError] = useState("");
   const [codeCopied, setCodeCopied] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(() => {
+    const saved = localStorage.getItem("team-members-open");
+    return saved !== null ? saved === "true" : true; // default open
+  });
+  const [billsOpen, setBillsOpen] = useState(() => {
+    const saved = localStorage.getItem("team-bills-open");
+    return saved !== null ? saved === "true" : true;
+  });
+  const [billsFullscreen, setBillsFullscreen] = useState(false);
+  const {
+    height: listHeight,
+    collapsed: listCollapsed,
+    onMouseDown: onListResizeDown,
+    toggle: toggleListCollapse,
+  } = useResizableHeight({
+    storageKey: "team-bills-list-height",
+    defaultHeight: 480,
+    minHeight: 150,
+  });
+  const [billsLayout, setBillsLayoutState] = useState(
+    () => localStorage.getItem("team-bills-layout") || "icon",
+  );
+  const setBillsLayout = (v) => {
+    setBillsLayoutState(v);
+    localStorage.setItem("team-bills-layout", v);
+  };
+  const [listSort, setListSort] = useState({ key: null, dir: "asc" }); // key: "bill" | "party" | "flag"
+  const scrollRestored = useRef(false);
+  const pageRef = useRef(null);
+
+  // Persist collapse states
+  useEffect(() => {
+    localStorage.setItem("team-members-open", String(membersOpen));
+  }, [membersOpen]);
+  useEffect(() => {
+    localStorage.setItem("team-bills-open", String(billsOpen));
+  }, [billsOpen]);
+
+  // Find the scrollable parent (Layout's overflow-auto container)
+  const getScrollContainer = useCallback(() => {
+    let el = pageRef.current;
+    while (el) {
+      const style = getComputedStyle(el);
+      if (style.overflow === "auto" || style.overflowY === "auto") return el;
+      el = el.parentElement;
+    }
+    return null;
+  }, []);
+
+  // Save scroll position on scroll
+  useEffect(() => {
+    const container = getScrollContainer();
+    if (!container) return;
+    const handleScroll = () => {
+      sessionStorage.setItem("team-scroll-y", String(container.scrollTop));
+    };
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, [getScrollContainer]);
+
+  // Restore scroll position once after mount
+  useEffect(() => {
+    if (scrollRestored.current) return;
+    scrollRestored.current = true;
+    const savedY = parseInt(sessionStorage.getItem("team-scroll-y") || "0", 10);
+    if (savedY > 0) {
+      requestAnimationFrame(() => {
+        const container = getScrollContainer();
+        if (container) container.scrollTop = savedY;
+      });
+    }
+  }, [getScrollContainer]);
 
   // Load the current user's team (no auto-create — returns null if user has no team)
   const {
@@ -114,11 +233,112 @@ export default function Team() {
     queryFn: () => api.auth.me().catch(() => null),
   });
 
+  // Fetch team bill metadata (flag, policy_assistant, notes)
+  const { data: billMeta = {} } = useQuery({
+    queryKey: ["teamBillMeta", teamId],
+    queryFn: () => api.entities.Team.getBillMetadata(teamId),
+    enabled: !!teamId,
+  });
+
   const trackedBillIds = userData?.tracked_bill_ids ?? [];
   const teamBills = allBills.filter((b) =>
     teamBillNumbers.includes(b.bill_number),
   );
   const isOwner = team?.created_by === authUser?.id;
+
+  // ── Metadata update helpers ────────────────────────────────────────────────
+  const updateMetaMutation = useMutation({
+    mutationFn: ({ billNumber, fields }) =>
+      api.entities.Team.updateBillMetadata(teamId, billNumber, fields),
+    onMutate: async ({ billNumber, fields }) => {
+      await queryClient.cancelQueries({ queryKey: ["teamBillMeta", teamId] });
+      const prev = queryClient.getQueryData(["teamBillMeta", teamId]);
+      queryClient.setQueryData(["teamBillMeta", teamId], (old) => ({
+        ...old,
+        [billNumber]: { ...(old?.[billNumber] || {}), ...fields },
+      }));
+      return { prev };
+    },
+    onError: (_e, _v, ctx) => {
+      queryClient.setQueryData(["teamBillMeta", teamId], ctx.prev);
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["teamBillMeta", teamId] });
+    },
+  });
+
+  const handleMetaChange = useCallback(
+    (billNumber, fields) => {
+      updateMetaMutation.mutate({ billNumber, fields });
+    },
+    [updateMetaMutation],
+  );
+
+  const activeMembers = members.filter((m) => m.status === "active");
+
+  // Party color mapping
+  const PARTY_COLORS = {
+    D: "bg-indigo-500 text-white",
+    R: "bg-rose-500 text-white",
+    I: "bg-slate-400 text-white",
+    G: "bg-green-500 text-white",
+    L: "bg-yellow-500 text-white",
+  };
+
+  // ── Sort helpers for list view ─────────────────────────────────────────────
+  const toggleSort = useCallback((key) => {
+    setListSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: "asc" },
+    );
+  }, []);
+
+  const SortIcon = ({ column }) => {
+    if (listSort.key !== column)
+      return <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />;
+    return listSort.dir === "asc" ? (
+      <ArrowUp className="w-3.5 h-3.5 text-blue-600" />
+    ) : (
+      <ArrowDown className="w-3.5 h-3.5 text-blue-600" />
+    );
+  };
+
+  const extractBillNum = (bn) => {
+    const m = String(bn || "").match(/^([A-Za-z]+)\s*(\d+)/);
+    return m
+      ? { prefix: m[1].toUpperCase(), num: parseInt(m[2], 10) }
+      : { prefix: "", num: 0 };
+  };
+
+  const FLAG_ORDER = { high: 0, low: 1 };
+  const PARTY_ORDER = { D: 0, R: 1, I: 2, G: 3, L: 4 };
+
+  const sortedTeamBills = useMemo(() => {
+    if (!listSort.key || billsLayout !== "list") return teamBills;
+    const dir = listSort.dir === "asc" ? 1 : -1;
+    return [...teamBills].sort((a, b) => {
+      if (listSort.key === "bill") {
+        const an = extractBillNum(a.bill_number);
+        const bn = extractBillNum(b.bill_number);
+        if (an.prefix !== bn.prefix) return an.prefix < bn.prefix ? -dir : dir;
+        return (an.num - bn.num) * dir;
+      }
+      if (listSort.key === "party") {
+        const ap = PARTY_ORDER[a.sponsor_party] ?? 99;
+        const bp = PARTY_ORDER[b.sponsor_party] ?? 99;
+        return (ap - bp) * dir;
+      }
+      if (listSort.key === "flag") {
+        const am = billMeta[a.bill_number]?.flag;
+        const bm = billMeta[b.bill_number]?.flag;
+        const af = FLAG_ORDER[am] ?? 99;
+        const bf = FLAG_ORDER[bm] ?? 99;
+        return (af - bf) * dir;
+      }
+      return 0;
+    });
+  }, [teamBills, listSort, billsLayout, billMeta]);
 
   const handleLeaveTeam = async () => {
     const activeMembers = members.filter(
@@ -481,7 +701,7 @@ export default function Team() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div ref={pageRef} className="min-h-full bg-slate-50">
       <div className="max-w-7xl mx-auto p-6 space-y-6">
         {/* Header */}
         <div className="flex items-center gap-4">
@@ -511,161 +731,607 @@ export default function Team() {
           )}
         </div>
 
-        {/* Members */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Users className="w-5 h-5" />
-              Team Members
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              {members.map((member) => (
-                <div
-                  key={member.id}
-                  className="flex items-center justify-between p-3 bg-slate-50 rounded-lg"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
-                      <span className="text-blue-600 text-sm font-semibold">
-                        {member.email?.[0]?.toUpperCase()}
-                      </span>
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium text-slate-900">
-                        {member.email}
-                      </p>
-                      <div className="flex items-center gap-2 mt-0.5">
-                        <Badge variant="outline" className="text-xs capitalize">
-                          {member.role}
-                        </Badge>
-                        {member.status === "pending" && (
-                          <Badge
-                            variant="outline"
-                            className="text-xs text-orange-600 border-orange-200"
-                          >
-                            Pending invite
-                          </Badge>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  {isOwner && member.user_id !== authUser?.id && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="text-red-500 hover:text-red-700 hover:bg-red-50"
-                      onClick={() => removeMemberMutation.mutate(member.id)}
-                      disabled={removeMemberMutation.isPending}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </Button>
-                  )}
-                </div>
-              ))}
-              {members.length === 0 && (
-                <p className="text-sm text-slate-500 italic">
-                  No members yet. Invite someone below.
-                </p>
-              )}
-            </div>
-
-            {/* Leave team */}
-            <div className="pt-3 border-t border-slate-200">
-              <Button
-                variant="outline"
-                className="gap-2 text-red-600 border-red-200 hover:bg-red-50"
-                onClick={handleLeaveTeam}
-              >
-                <LogOut className="w-4 h-4" />
-                {isOwner ? "Leave & Transfer Ownership" : "Leave Team"}
-              </Button>
-            </div>
-
-            {/* Invite form (owner only) */}
-            {isOwner && (
-              <div className="pt-3 border-t border-slate-200 space-y-2">
-                <div className="flex gap-2">
-                  <div className="relative flex-1">
-                    <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                    <Input
-                      type="email"
-                      placeholder="Invite by email address..."
-                      value={inviteEmail}
-                      onChange={(e) => {
-                        setInviteEmail(e.target.value);
-                        setInviteError("");
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && inviteEmail.trim()) {
-                          inviteMutation.mutate(inviteEmail.trim());
-                        }
-                      }}
-                      className="pl-10"
-                    />
-                  </div>
-                  <Button
-                    onClick={() => inviteMutation.mutate(inviteEmail.trim())}
-                    disabled={!inviteEmail.trim() || inviteMutation.isPending}
-                    className="bg-blue-600 hover:bg-blue-700 gap-2"
-                  >
-                    <UserPlus className="w-4 h-4" />
-                    Invite
-                  </Button>
-                </div>
-                {inviteError && (
-                  <p className="text-sm text-red-600">{inviteError}</p>
-                )}
-                <p className="text-xs text-slate-500">
-                  The invited person will automatically join when they log in
-                  with that email.
-                </p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Team Bills */}
-        <div className="space-y-4">
-          <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
-            <Star className="w-5 h-5 text-yellow-500" />
-            Team Bills ({teamBills.length})
-          </h2>
-
-          {teamBills.length > 0 ? (
-            <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-              {teamBills.map((bill) => (
-                <BillCard
-                  key={bill.id}
-                  bill={bill}
-                  onViewDetails={setSelectedBill}
-                  onToggleTracking={() => {}}
-                  isTracked={trackedBillIds.includes(bill.bill_number)}
-                  isInTeam={true}
-                  onAddToTeam={() =>
-                    removeBillMutation.mutate(bill.bill_number)
-                  }
-                  teamButtonLabel="Remove from Team"
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="text-center py-12 bg-white rounded-xl border border-slate-200">
-              <Star className="w-12 h-12 text-slate-400 mx-auto mb-4" />
-              <h3 className="text-xl font-semibold text-slate-900 mb-2">
-                No team bills yet
-              </h3>
-              <p className="text-slate-600">
-                Use the "Add to Team" button on any bill in the Dashboard to
-                share it with your team.
-              </p>
-            </div>
-          )}
-        </div>
-
         {/* Team Chat */}
         <TeamChat teamId={teamId} />
+
+        {/* Team Bills */}
+        {billsFullscreen && (
+          <div
+            className="fixed inset-0 z-50 bg-black/40"
+            onClick={() => setBillsFullscreen(false)}
+          />
+        )}
+        <div
+          className={
+            billsFullscreen
+              ? "fixed inset-4 z-50 bg-white rounded-xl shadow-2xl flex flex-col overflow-hidden"
+              : ""
+          }
+        >
+          {billsFullscreen && (
+            <div className="flex items-center justify-between px-6 py-3 border-b border-slate-200 shrink-0">
+              <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                <Star className="w-5 h-5 text-yellow-500" />
+                Team Bills ({teamBills.length})
+              </h2>
+              <button
+                onClick={() => setBillsFullscreen(false)}
+                className="p-1.5 rounded-md hover:bg-slate-100 transition-colors"
+                title="Exit fullscreen"
+              >
+                <X className="w-5 h-5 text-slate-500" />
+              </button>
+            </div>
+          )}
+          <div className={billsFullscreen ? "flex-1 overflow-auto p-6" : ""}>
+            <Collapsible open={billsOpen} onOpenChange={setBillsOpen}>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                      <Star className="w-5 h-5 text-yellow-500" />
+                      Team Bills ({teamBills.length})
+                    </h2>
+
+                    {/* Layout toggle */}
+                    <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-1">
+                      <button
+                        onClick={() => {
+                          setBillsLayout("icon");
+                          setBillsFullscreen(false);
+                        }}
+                        className={`p-1.5 rounded-md transition-colors ${
+                          billsLayout === "icon"
+                            ? "bg-white text-slate-900 shadow-sm"
+                            : "text-slate-500 hover:text-slate-700"
+                        }`}
+                        title="Card view"
+                      >
+                        <LayoutGrid className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => setBillsLayout("list")}
+                        className={`p-1.5 rounded-md transition-colors ${
+                          billsLayout === "list"
+                            ? "bg-white text-slate-900 shadow-sm"
+                            : "text-slate-500 hover:text-slate-700"
+                        }`}
+                        title="List view"
+                      >
+                        <List className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Fullscreen toggle */}
+                  <div className="flex items-center gap-1">
+                    {billsLayout === "list" && (
+                      <button
+                        onClick={() => {
+                          if (!billsOpen) setBillsOpen(true);
+                          setBillsFullscreen((f) => !f);
+                        }}
+                        className="p-1.5 rounded-md hover:bg-slate-100 transition-colors"
+                        title={
+                          billsFullscreen ? "Exit fullscreen" : "Fullscreen"
+                        }
+                      >
+                        {billsFullscreen ? (
+                          <Minimize2 className="w-4 h-4 text-slate-500" />
+                        ) : (
+                          <Maximize2 className="w-4 h-4 text-slate-500" />
+                        )}
+                      </button>
+                    )}
+
+                    {/* Collapse toggle */}
+                    <CollapsibleTrigger asChild>
+                      <button className="p-1.5 rounded-md hover:bg-slate-100 transition-colors">
+                        <ChevronDown
+                          className={`w-5 h-5 text-slate-500 transition-transform duration-200 ${billsOpen ? "rotate-180" : ""}`}
+                        />
+                      </button>
+                    </CollapsibleTrigger>
+                  </div>
+                </div>
+
+                <CollapsibleContent>
+                  {teamBills.length > 0 ? (
+                    billsLayout === "icon" ? (
+                      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+                        {teamBills.map((bill) => {
+                          const meta = billMeta[bill.bill_number] || {};
+                          const assignee = meta.policy_assistant
+                            ? activeMembers.find(
+                                (m) => m.user_id === meta.policy_assistant,
+                              )
+                            : null;
+                          return (
+                            <BillCard
+                              key={bill.id}
+                              bill={bill}
+                              onViewDetails={setSelectedBill}
+                              onToggleTracking={() => {}}
+                              isTracked={trackedBillIds.includes(
+                                bill.bill_number,
+                              )}
+                              isInTeam={true}
+                              onAddToTeam={() =>
+                                removeBillMutation.mutate(bill.bill_number)
+                              }
+                              teamButtonLabel="Remove from Team"
+                              teamMeta={{
+                                ...meta,
+                                assigneeName: assignee?.email ?? null,
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      /* ── List / Spreadsheet View ─────────────────────────── */
+                      <div>
+                        {listCollapsed && !billsFullscreen ? (
+                          <Card
+                            className="cursor-pointer hover:bg-slate-50 transition-colors"
+                            onClick={toggleListCollapse}
+                          >
+                            <div className="text-center py-3 text-sm text-slate-400">
+                              List collapsed — click or drag to expand
+                            </div>
+                          </Card>
+                        ) : (
+                          <Card>
+                            <div
+                              className={`overflow-x-auto ${!billsFullscreen ? "overflow-y-auto" : ""}`}
+                              style={
+                                !billsFullscreen
+                                  ? { maxHeight: `${listHeight}px` }
+                                  : undefined
+                              }
+                            >
+                              <Table>
+                                <TableHeader>
+                                  <TableRow className="bg-slate-50">
+                                    <TableHead className="w-[100px] font-semibold">
+                                      <button
+                                        className="flex items-center gap-1 hover:text-blue-700 transition-colors"
+                                        onClick={() => toggleSort("bill")}
+                                      >
+                                        Bill # <SortIcon column="bill" />
+                                      </button>
+                                    </TableHead>
+                                    <TableHead className="min-w-[200px] font-semibold">
+                                      Title
+                                    </TableHead>
+                                    <TableHead className="min-w-[160px] font-semibold">
+                                      Primary Sponsor
+                                    </TableHead>
+                                    <TableHead className="w-[90px] font-semibold">
+                                      <button
+                                        className="flex items-center gap-1 hover:text-blue-700 transition-colors"
+                                        onClick={() => toggleSort("party")}
+                                      >
+                                        Party <SortIcon column="party" />
+                                      </button>
+                                    </TableHead>
+                                    <TableHead className="min-w-[140px] font-semibold">
+                                      Committee
+                                    </TableHead>
+                                    <TableHead className="w-[110px] font-semibold">
+                                      <button
+                                        className="flex items-center gap-1 hover:text-blue-700 transition-colors"
+                                        onClick={() => toggleSort("flag")}
+                                      >
+                                        Flag <SortIcon column="flag" />
+                                      </button>
+                                    </TableHead>
+                                    <TableHead className="w-[60px] font-semibold">
+                                      Link
+                                    </TableHead>
+                                    <TableHead className="min-w-[150px] font-semibold">
+                                      Policy Assistant
+                                    </TableHead>
+                                    <TableHead className="min-w-[200px] font-semibold">
+                                      Bill Summary
+                                    </TableHead>
+                                    <TableHead className="min-w-[200px] font-semibold">
+                                      <span className="flex items-center gap-1">
+                                        <Sparkles className="w-3.5 h-3.5 text-purple-500" />
+                                        AI Summary
+                                      </span>
+                                    </TableHead>
+                                  </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                  {sortedTeamBills.map((bill) => {
+                                    const meta =
+                                      billMeta[bill.bill_number] || {};
+                                    return (
+                                      <TableRow
+                                        key={bill.id}
+                                        className="align-top"
+                                      >
+                                        {/* Bill Number */}
+                                        <TableCell className="font-mono font-semibold text-blue-700 whitespace-nowrap">
+                                          <button
+                                            className="hover:underline text-left"
+                                            onClick={() =>
+                                              setSelectedBill(bill)
+                                            }
+                                          >
+                                            {bill.bill_number}
+                                          </button>
+                                        </TableCell>
+
+                                        {/* Title */}
+                                        <TableCell className="text-sm text-slate-700 max-w-[280px]">
+                                          <span className="line-clamp-2">
+                                            {bill.title}
+                                          </span>
+                                        </TableCell>
+
+                                        {/* Primary Sponsor */}
+                                        <TableCell className="text-sm text-slate-700 whitespace-nowrap">
+                                          {bill.sponsor || "Unknown"}
+                                        </TableCell>
+
+                                        {/* Party */}
+                                        <TableCell>
+                                          {bill.sponsor_party ? (
+                                            <span
+                                              className={`inline-flex items-center justify-center px-2 py-0.5 rounded text-xs font-semibold ${
+                                                PARTY_COLORS[
+                                                  bill.sponsor_party
+                                                ] ||
+                                                "bg-slate-200 text-slate-700"
+                                              }`}
+                                            >
+                                              {bill.sponsor_party === "D"
+                                                ? "Democrat"
+                                                : bill.sponsor_party === "R"
+                                                  ? "Republican"
+                                                  : bill.sponsor_party}
+                                            </span>
+                                          ) : (
+                                            <span className="text-xs text-slate-400">
+                                              —
+                                            </span>
+                                          )}
+                                        </TableCell>
+
+                                        {/* Committee */}
+                                        <TableCell className="text-sm text-slate-700">
+                                          {bill.current_committee ? (
+                                            <Badge
+                                              variant="outline"
+                                              className="text-xs font-normal"
+                                            >
+                                              {bill.current_committee}
+                                            </Badge>
+                                          ) : (
+                                            <span className="text-xs text-slate-400">
+                                              —
+                                            </span>
+                                          )}
+                                        </TableCell>
+
+                                        {/* Flag */}
+                                        <TableCell>
+                                          <Select
+                                            value={meta.flag || "_none"}
+                                            onValueChange={(val) =>
+                                              handleMetaChange(
+                                                bill.bill_number,
+                                                {
+                                                  flag:
+                                                    val === "_none"
+                                                      ? null
+                                                      : val,
+                                                },
+                                              )
+                                            }
+                                          >
+                                            <SelectTrigger className="h-8 text-xs w-[100px]">
+                                              <SelectValue placeholder="—" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                              <SelectItem value="_none">
+                                                <span className="text-slate-400">
+                                                  None
+                                                </span>
+                                              </SelectItem>
+                                              <SelectItem value="low">
+                                                <span className="flex items-center gap-1 text-green-700">
+                                                  <Shield className="w-3 h-3" />{" "}
+                                                  Low Risk
+                                                </span>
+                                              </SelectItem>
+                                              <SelectItem value="high">
+                                                <span className="flex items-center gap-1 text-red-700">
+                                                  <AlertTriangle className="w-3 h-3" />{" "}
+                                                  High Risk
+                                                </span>
+                                              </SelectItem>
+                                            </SelectContent>
+                                          </Select>
+                                        </TableCell>
+
+                                        {/* Link */}
+                                        <TableCell>
+                                          {bill.url ? (
+                                            <a
+                                              href={bill.url}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              className="text-blue-600 hover:text-blue-800"
+                                            >
+                                              <ExternalLink className="w-4 h-4" />
+                                            </a>
+                                          ) : (
+                                            <span className="text-xs text-slate-400">
+                                              —
+                                            </span>
+                                          )}
+                                        </TableCell>
+
+                                        {/* Policy Assistant */}
+                                        <TableCell>
+                                          <Select
+                                            value={
+                                              meta.policy_assistant || "_none"
+                                            }
+                                            onValueChange={(val) =>
+                                              handleMetaChange(
+                                                bill.bill_number,
+                                                {
+                                                  policy_assistant:
+                                                    val === "_none"
+                                                      ? null
+                                                      : val,
+                                                },
+                                              )
+                                            }
+                                          >
+                                            <SelectTrigger className="h-8 text-xs w-[140px]">
+                                              <SelectValue placeholder="Assign..." />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                              <SelectItem value="_none">
+                                                <span className="text-slate-400">
+                                                  Unassigned
+                                                </span>
+                                              </SelectItem>
+                                              {activeMembers.map((m) => (
+                                                <SelectItem
+                                                  key={m.user_id}
+                                                  value={m.user_id}
+                                                >
+                                                  {m.email}
+                                                </SelectItem>
+                                              ))}
+                                            </SelectContent>
+                                          </Select>
+                                        </TableCell>
+
+                                        {/* Bill Summary (editable notes) */}
+                                        <TableCell>
+                                          <Textarea
+                                            placeholder="Add notes..."
+                                            className="text-xs min-h-[60px] resize-y w-full"
+                                            value={
+                                              meta.bill_summary_notes || ""
+                                            }
+                                            onChange={(e) =>
+                                              queryClient.setQueryData(
+                                                ["teamBillMeta", teamId],
+                                                (old) => ({
+                                                  ...old,
+                                                  [bill.bill_number]: {
+                                                    ...(old?.[
+                                                      bill.bill_number
+                                                    ] || {}),
+                                                    bill_summary_notes:
+                                                      e.target.value,
+                                                  },
+                                                }),
+                                              )
+                                            }
+                                            onBlur={(e) =>
+                                              handleMetaChange(
+                                                bill.bill_number,
+                                                {
+                                                  bill_summary_notes:
+                                                    e.target.value,
+                                                },
+                                              )
+                                            }
+                                          />
+                                        </TableCell>
+
+                                        {/* AI Summary (read-only) */}
+                                        <TableCell className="text-xs text-slate-600 max-w-[240px]">
+                                          {bill.summary ? (
+                                            <TooltipProvider>
+                                              <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                  <p className="line-clamp-3 cursor-help">
+                                                    {bill.summary}
+                                                  </p>
+                                                </TooltipTrigger>
+                                                <TooltipContent
+                                                  side="left"
+                                                  className="max-w-sm text-xs whitespace-pre-line"
+                                                >
+                                                  {bill.summary}
+                                                </TooltipContent>
+                                              </Tooltip>
+                                            </TooltipProvider>
+                                          ) : (
+                                            <span className="text-slate-400 italic">
+                                              No AI summary
+                                            </span>
+                                          )}
+                                        </TableCell>
+                                      </TableRow>
+                                    );
+                                  })}
+                                </TableBody>
+                              </Table>
+                            </div>
+                          </Card>
+                        )}
+                        {!billsFullscreen && (
+                          <ResizeHandle onMouseDown={onListResizeDown} />
+                        )}
+                      </div>
+                    )
+                  ) : (
+                    <div className="text-center py-12 bg-white rounded-xl border border-slate-200">
+                      <Star className="w-12 h-12 text-slate-400 mx-auto mb-4" />
+                      <h3 className="text-xl font-semibold text-slate-900 mb-2">
+                        No team bills yet
+                      </h3>
+                      <p className="text-slate-600">
+                        Use the "Add to Team" button on any bill in the
+                        Dashboard to share it with your team.
+                      </p>
+                    </div>
+                  )}
+                </CollapsibleContent>
+              </div>
+            </Collapsible>
+          </div>
+        </div>
+
+        {/* Members */}
+        <Collapsible open={membersOpen} onOpenChange={setMembersOpen}>
+          <Card>
+            <CardHeader>
+              <CollapsibleTrigger asChild>
+                <button className="flex items-center justify-between w-full text-left">
+                  <CardTitle className="flex items-center gap-2">
+                    <Users className="w-5 h-5" />
+                    Team Members ({members.length})
+                  </CardTitle>
+                  <ChevronDown
+                    className={`w-5 h-5 text-slate-500 transition-transform duration-200 ${membersOpen ? "rotate-180" : ""}`}
+                  />
+                </button>
+              </CollapsibleTrigger>
+            </CardHeader>
+            <CollapsibleContent>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  {members.map((member) => (
+                    <div
+                      key={member.id}
+                      className="flex items-center justify-between p-3 bg-slate-50 rounded-lg"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
+                          <span className="text-blue-600 text-sm font-semibold">
+                            {member.email?.[0]?.toUpperCase()}
+                          </span>
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium text-slate-900">
+                            {member.email}
+                          </p>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <Badge
+                              variant="outline"
+                              className="text-xs capitalize"
+                            >
+                              {member.role}
+                            </Badge>
+                            {member.status === "pending" && (
+                              <Badge
+                                variant="outline"
+                                className="text-xs text-orange-600 border-orange-200"
+                              >
+                                Pending invite
+                              </Badge>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      {isOwner && member.user_id !== authUser?.id && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-red-500 hover:text-red-700 hover:bg-red-50"
+                          onClick={() => removeMemberMutation.mutate(member.id)}
+                          disabled={removeMemberMutation.isPending}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                  {members.length === 0 && (
+                    <p className="text-sm text-slate-500 italic">
+                      No members yet. Invite someone below.
+                    </p>
+                  )}
+                </div>
+
+                {/* Leave team */}
+                <div className="pt-3 border-t border-slate-200">
+                  <Button
+                    variant="outline"
+                    className="gap-2 text-red-600 border-red-200 hover:bg-red-50"
+                    onClick={handleLeaveTeam}
+                  >
+                    <LogOut className="w-4 h-4" />
+                    {isOwner ? "Leave & Transfer Ownership" : "Leave Team"}
+                  </Button>
+                </div>
+
+                {/* Invite form (owner only) */}
+                {isOwner && (
+                  <div className="pt-3 border-t border-slate-200 space-y-2">
+                    <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                        <Input
+                          type="email"
+                          placeholder="Invite by email address..."
+                          value={inviteEmail}
+                          onChange={(e) => {
+                            setInviteEmail(e.target.value);
+                            setInviteError("");
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && inviteEmail.trim()) {
+                              inviteMutation.mutate(inviteEmail.trim());
+                            }
+                          }}
+                          className="pl-10"
+                        />
+                      </div>
+                      <Button
+                        onClick={() =>
+                          inviteMutation.mutate(inviteEmail.trim())
+                        }
+                        disabled={
+                          !inviteEmail.trim() || inviteMutation.isPending
+                        }
+                        className="bg-blue-600 hover:bg-blue-700 gap-2"
+                      >
+                        <UserPlus className="w-4 h-4" />
+                        Invite
+                      </Button>
+                    </div>
+                    {inviteError && (
+                      <p className="text-sm text-red-600">{inviteError}</p>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </CollapsibleContent>
+          </Card>
+        </Collapsible>
       </div>
 
       <BillDetailsModal
@@ -686,6 +1352,15 @@ export default function Team() {
         onAddToTeam={() => {
           if (selectedBill) removeBillMutation.mutate(selectedBill.bill_number);
         }}
+        teamMeta={
+          selectedBill ? billMeta[selectedBill.bill_number] || {} : undefined
+        }
+        onTeamMetaChange={
+          selectedBill
+            ? (fields) => handleMetaChange(selectedBill.bill_number, fields)
+            : undefined
+        }
+        teamMembers={activeMembers}
       />
     </div>
   );

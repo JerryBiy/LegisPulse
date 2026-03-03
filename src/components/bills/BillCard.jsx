@@ -12,6 +12,10 @@ import {
   Plus,
   Check,
   Users,
+  Shield,
+  AlertTriangle,
+  UserCheck,
+  StickyNote,
 } from "lucide-react";
 import { format } from "date-fns";
 
@@ -91,6 +95,7 @@ export default function BillCard({
   isInTeam,
   onAddToTeam,
   teamButtonLabel,
+  teamMeta,
 }) {
   const ChamberIcon = getChamberIcon(bill.chamber);
   const [showAllSponsors, setShowAllSponsors] = useState(false);
@@ -241,6 +246,39 @@ export default function BillCard({
             <p className="text-sm text-slate-700 font-medium">
               {bill.last_action}
             </p>
+          </div>
+        )}
+
+        {/* Team metadata strip — only shown when teamMeta is provided */}
+        {teamMeta && (
+          <div className="bg-indigo-50/60 border border-indigo-100 rounded-lg p-3 space-y-2">
+            <div className="flex items-center gap-3 flex-wrap">
+              {/* Flag badge */}
+              {teamMeta.flag === "high" && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700 ring-1 ring-red-200">
+                  <AlertTriangle className="w-3 h-3" /> High Risk
+                </span>
+              )}
+              {teamMeta.flag === "low" && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700 ring-1 ring-green-200">
+                  <Shield className="w-3 h-3" /> Low Risk
+                </span>
+              )}
+              {/* Assigned policy assistant */}
+              {teamMeta.assigneeName && (
+                <span className="inline-flex items-center gap-1 text-xs text-indigo-700">
+                  <UserCheck className="w-3 h-3" />
+                  {teamMeta.assigneeName}
+                </span>
+              )}
+            </div>
+            {/* Bill summary notes preview */}
+            {teamMeta.bill_summary_notes && (
+              <p className="text-xs text-slate-600 line-clamp-2 flex items-start gap-1">
+                <StickyNote className="w-3 h-3 mt-0.5 shrink-0 text-indigo-400" />
+                {teamMeta.bill_summary_notes}
+              </p>
+            )}
           </div>
         )}
 

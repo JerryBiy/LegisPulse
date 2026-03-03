@@ -176,6 +176,15 @@ const extractPdfBytesFromBillTextPayload = (textPayload) => {
 
   for (const candidate of candidates) {
     if (typeof candidate !== "string" || !candidate.trim()) continue;
+    // Skip base64 blobs that would decode to more than MAX_PDF_BYTES.
+    // Base64 encodes 3 bytes per 4 chars; estimate decoded size.
+    const estimatedBytes = Math.ceil((candidate.trim().length * 3) / 4);
+    if (estimatedBytes > MAX_PDF_BYTES) {
+      console.warn(
+        `Skipping oversized base64 PDF payload (~${(estimatedBytes / 1024 / 1024).toFixed(1)} MB).`,
+      );
+      continue;
+    }
     const binary = decodeBase64ToBinary(candidate);
     if (!binary) continue;
     if (!binary.startsWith("%PDF-")) continue;
@@ -234,8 +243,22 @@ const extractTextFromBillTextPayload = (textPayload) => {
   return bestText;
 };
 
+// Maximum PDF binary size we'll attempt to parse (10 MB).
+const MAX_PDF_BYTES = 10 * 1024 * 1024;
+
 const extractTextFromPdfBytes = async (pdfData) => {
   if (!pdfData?.length) return "";
+
+  // Reject oversized PDFs early to avoid OOM.
+  if (pdfData.length > MAX_PDF_BYTES) {
+    console.warn(
+      `PDF too large for in-browser parsing (${(pdfData.length / 1024 / 1024).toFixed(1)} MB). Skipping.`,
+    );
+    return "";
+  }
+
+  let pdfDocument = null;
+  let loadingTask = null;
 
   try {
     const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
@@ -245,26 +268,31 @@ const extractTextFromPdfBytes = async (pdfData) => {
       pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker.default;
     }
 
-    const loadingTask = pdfjs.getDocument({
+    loadingTask = pdfjs.getDocument({
       data: pdfData,
       isEvalSupported: false,
     });
 
-    const pdfDocument = await loadingTask.promise;
+    pdfDocument = await loadingTask.promise;
     const maxPages = Math.min(pdfDocument.numPages || 0, 60);
     const pageTexts = [];
 
     for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
       const page = await pdfDocument.getPage(pageNumber);
-      const content = await page.getTextContent();
-      const text = content.items
-        .map((item) =>
-          "str" in item && typeof item.str === "string" ? item.str : "",
-        )
-        .filter(Boolean)
-        .join(" ");
+      try {
+        const content = await page.getTextContent();
+        const text = content.items
+          .map((item) =>
+            "str" in item && typeof item.str === "string" ? item.str : "",
+          )
+          .filter(Boolean)
+          .join(" ");
 
-      if (text) pageTexts.push(text);
+        if (text) pageTexts.push(text);
+      } finally {
+        // Release per-page resources immediately.
+        page.cleanup();
+      }
     }
 
     const extracted = normalizeWhitespace(pageTexts.join("\n"));
@@ -272,19 +300,92 @@ const extractTextFromPdfBytes = async (pdfData) => {
   } catch (error) {
     console.warn("Unable to extract PDF text for AI context", error);
     return "";
+  } finally {
+    // *** Critical: release the entire PDF document to free memory. ***
+    if (pdfDocument) {
+      try {
+        pdfDocument.destroy();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (loadingTask) {
+      try {
+        loadingTask.destroy();
+      } catch {
+        /* ignore */
+      }
+    }
   }
 };
+
+// Maximum bytes to download for a remote PDF (10 MB).
+const MAX_PDF_DOWNLOAD_BYTES = 10 * 1024 * 1024;
 
 const extractTextFromPdfUrl = async (pdfUrl) => {
   if (!pdfUrl) return "";
 
+  let controller;
   try {
-    const response = await fetch(pdfUrl);
+    controller = new AbortController();
+    // Impose a 30-second timeout so a slow download doesn't hang forever.
+    const timeoutId = setTimeout(() => controller.abort(), 30_000);
+
+    const response = await fetch(pdfUrl, { signal: controller.signal });
+    clearTimeout(timeoutId);
+
     if (!response.ok) return "";
-    const pdfData = new Uint8Array(await response.arrayBuffer());
+
+    // Check Content-Length header to skip oversized PDFs before downloading.
+    const contentLength = Number(response.headers.get("content-length") || 0);
+    if (contentLength > MAX_PDF_DOWNLOAD_BYTES) {
+      console.warn(
+        `Remote PDF too large (${(contentLength / 1024 / 1024).toFixed(1)} MB). Skipping download.`,
+      );
+      return "";
+    }
+
+    // Stream into a limited buffer to guard against missing/wrong Content-Length.
+    const reader = response.body?.getReader();
+    if (!reader) {
+      // Fallback for environments without ReadableStream.
+      const buf = await response.arrayBuffer();
+      if (buf.byteLength > MAX_PDF_DOWNLOAD_BYTES) return "";
+      return await extractTextFromPdfBytes(new Uint8Array(buf));
+    }
+
+    const chunks = [];
+    let totalBytes = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_PDF_DOWNLOAD_BYTES) {
+        console.warn("PDF download exceeded size limit. Aborting.");
+        reader.cancel();
+        return "";
+      }
+      chunks.push(value);
+    }
+
+    // Merge chunks into a single Uint8Array.
+    const pdfData = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      pdfData.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    // Release chunk references immediately.
+    chunks.length = 0;
+
     return await extractTextFromPdfBytes(pdfData);
   } catch (error) {
-    console.warn("Unable to fetch PDF URL for AI context", error);
+    if (error?.name === "AbortError") {
+      console.warn("PDF download timed out or was aborted.");
+    } else {
+      console.warn("Unable to fetch PDF URL for AI context", error);
+    }
     return "";
   }
 };
@@ -369,14 +470,20 @@ export async function fetchBillTextForAI(legiscanBillId) {
     return dateB - dateA;
   });
 
+  // Limit how many text versions we attempt (avoid processing many large docs).
+  const MAX_TEXT_ATTEMPTS = 3;
   let bestExtractedText = "";
+  let attempts = 0;
 
   for (const textItem of texts) {
+    if (attempts >= MAX_TEXT_ATTEMPTS) break;
     const docId = textItem?.doc_id || textItem?.text_id || textItem?.id;
     if (!docId) continue;
+    attempts += 1;
 
+    let textResponse = null;
     try {
-      const textResponse = await legiscanRequest("getBillText", { id: docId });
+      textResponse = await legiscanRequest("getBillText", { id: docId });
       const extracted = extractTextFromBillTextPayload(textResponse?.text);
       if (extracted && extracted.length > bestExtractedText.length) {
         bestExtractedText = extracted;
@@ -389,6 +496,9 @@ export async function fetchBillTextForAI(legiscanBillId) {
 
       if (bestExtractedText.length < 300) {
         const pdfBytes = extractPdfBytesFromBillTextPayload(textResponse?.text);
+        // Release the raw API response before parsing the PDF to free memory.
+        textResponse = null;
+
         if (pdfBytes?.length) {
           const pdfText = await extractTextFromPdfBytes(pdfBytes);
           if (pdfText && pdfText.length > bestExtractedText.length) {
@@ -399,8 +509,12 @@ export async function fetchBillTextForAI(legiscanBillId) {
             }
           }
         }
+      } else {
+        // Release the raw response if we're not doing PDF extraction.
+        textResponse = null;
       }
     } catch (error) {
+      textResponse = null;
       console.warn(`getBillText failed for AI context doc ${docId}:`, error);
     }
   }
