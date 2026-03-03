@@ -302,23 +302,36 @@ export default function Dashboard() {
     sessionStorage.setItem("dashboard-display-count", String(displayCount));
   }, [displayCount]);
 
-  // Infinite scroll + save scroll position
+  // Save scroll position on scroll
   useEffect(() => {
     const handleScroll = () => {
       sessionStorage.setItem("dashboard-scroll-y", String(window.scrollY));
-      if (
-        window.innerHeight + window.scrollY >=
-        document.documentElement.scrollHeight - 500
-      ) {
-        if (displayCount < filteredBills.length) {
-          setDisplayCount((prev) => prev + 10);
-        }
-      }
     };
-
     window.addEventListener("scroll", handleScroll, { passive: true });
     return () => window.removeEventListener("scroll", handleScroll);
-  }, [displayCount, filteredBills.length]);
+  }, []);
+
+  // Infinite scroll via IntersectionObserver on the sentinel element
+  const sentinelRef = useRef(null);
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          setDisplayCount((prev) => {
+            if (prev < filteredBills.length) return prev + 10;
+            return prev;
+          });
+        }
+      },
+      { rootMargin: "500px" },
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [filteredBills.length]);
 
   // Restore scroll position once bills are rendered
   const scrollRestored = useRef(false);
@@ -472,7 +485,7 @@ export default function Dashboard() {
                 </AnimatePresence>
               </div>
               {displayCount < filteredBills.length && (
-                <div className="text-center py-8">
+                <div ref={sentinelRef} className="text-center py-8">
                   <div className="animate-pulse text-slate-600">
                     Loading more bills...
                   </div>
