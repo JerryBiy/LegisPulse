@@ -847,6 +847,7 @@ function MonthView({
   const INITIAL_AFTER = 3;
   const LOAD_MORE = 12; // add 12 months each time we hit an edge
   const EDGE_PX = 800; // trigger when within 800px of edge
+  const MAX_MONTHS = 120; // cap at ±10 years to prevent memory bloat
 
   const [beforeCount, setBeforeCount] = useState(INITIAL_BEFORE);
   const [afterCount, setAfterCount] = useState(INITIAL_AFTER);
@@ -947,17 +948,15 @@ function MonthView({
     }
 
     // --- Infinite scroll: expand when near edges ---
-    // No guard ref needed — React batches the setState calls and
-    // the functional updater guarantees we always read the latest value.
     const { scrollTop, scrollHeight, clientHeight } = container;
-    // Near bottom? Load more future months
+    // Near bottom? Load more future months (capped)
     if (scrollHeight - scrollTop - clientHeight < EDGE_PX) {
-      setAfterCount((c) => c + LOAD_MORE);
+      setAfterCount((c) => Math.min(c + LOAD_MORE, MAX_MONTHS));
     }
-    // Near top? Load more past months (only if not already pending)
+    // Near top? Load more past months (capped, only if not already pending)
     if (scrollTop < EDGE_PX && pendingScrollFix.current === null) {
       pendingScrollFix.current = scrollHeight;
-      setBeforeCount((c) => c + LOAD_MORE);
+      setBeforeCount((c) => Math.min(c + LOAD_MORE, MAX_MONTHS));
     }
   }, [onVisibleMonthChange]);
 
