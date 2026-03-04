@@ -287,6 +287,12 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
     enabled: !!teamId,
   });
 
+  // ── LC Tracking data ───────────────────────────────────────────────────────
+  const { data: lcTrackingMap = {} } = useQuery({
+    queryKey: ["lcTracking"],
+    queryFn: () => api.LcTracking.getAll(),
+  });
+
   const trackedBillIds = userData?.tracked_bill_ids ?? [];
   const teamBills = allBills.filter((b) =>
     teamBillNumbers.includes(b.bill_number),
@@ -676,6 +682,9 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
                                     ...meta,
                                     assigneeName: assignee?.email ?? null,
                                   }}
+                                  lcTracking={
+                                    lcTrackingMap[bill.bill_number] || null
+                                  }
                                 />
                               );
                             })}
@@ -1228,6 +1237,9 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
         teamMembers={activeMembers}
         personalMeta={undefined}
         onPersonalMetaChange={undefined}
+        lcTracking={
+          selectedBill ? lcTrackingMap[selectedBill.bill_number] || null : null
+        }
       />
     </Collapsible>
   );

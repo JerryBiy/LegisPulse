@@ -38,6 +38,8 @@ import {
   StickyNote,
   UserCheck,
   Check,
+  ArrowRight,
+  RefreshCw,
 } from "lucide-react";
 import { format } from "date-fns";
 import { api } from "@/api/apiClient";
@@ -153,6 +155,7 @@ export default function BillDetailsModal({
   teams,
   teamBillMap,
   onToggleTeamBill,
+  lcTracking,
 }) {
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [generatedSummary, setGeneratedSummary] = useState(null);
@@ -587,10 +590,28 @@ export default function BillDetailsModal({
                 <h3 className="font-semibold text-slate-900 mb-2">
                   {bill.title}
                 </h3>
-                {bill.lc_number && (
-                  <p className="text-sm text-slate-500 font-mono">
-                    LC Number: {bill.lc_number}
-                  </p>
+                {(bill.lc_number || lcTracking?.current_lc) && (
+                  <div className="space-y-1">
+                    <p className="text-sm text-slate-500 font-mono">
+                      LC Number: {bill.lc_number || lcTracking?.current_lc}
+                    </p>
+                    {lcTracking?.previous_lc &&
+                      lcTracking.previous_lc !== lcTracking.current_lc && (
+                        <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-200 text-sm">
+                          <RefreshCw className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                          <span className="text-amber-800 font-medium">
+                            LC Changed:
+                          </span>
+                          <span className="font-mono text-amber-700">
+                            {lcTracking.previous_lc}
+                          </span>
+                          <ArrowRight className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                          <span className="font-mono text-amber-900 font-semibold">
+                            {lcTracking.current_lc}
+                          </span>
+                        </div>
+                      )}
+                  </div>
                 )}
               </div>
 
@@ -914,7 +935,7 @@ export default function BillDetailsModal({
                       <div>
                         <p className="font-semibold">{sub.substitute_number}</p>
                         <p className="text-sm text-slate-500">
-                          LC: {sub.lc_number}
+                          {sub.lc_number}
                         </p>
                         {sub.date_introduced && (
                           <p className="text-sm text-slate-500">

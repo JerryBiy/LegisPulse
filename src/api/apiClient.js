@@ -251,6 +251,19 @@ export const api = {
         if (error) throw error;
         return { success: true };
       },
+
+      /** Bulk update lc_number for bills by bill_number. */
+      async updateLcNumbers(entries) {
+        const userId = await getUserId();
+        for (const { bill_number, lc_number } of entries) {
+          if (!lc_number) continue;
+          await supabase
+            .from("bills")
+            .update({ lc_number })
+            .eq("user_id", userId)
+            .eq("bill_number", bill_number);
+        }
+      },
     },
 
     EmailList: {
@@ -993,6 +1006,132 @@ export const api = {
         .delete()
         .eq("id", id)
         .eq("user_id", userId);
+      if (error) throw error;
+    },
+  },
+
+  // ─── LC Number Tracking ────────────────────────────────────────────────────
+  LcTracking: {
+    /** Fetch all LC tracking records for the current user. Returns map keyed by bill_number. */
+    async getAll() {
+      const userId = await getUserId();
+      const { data, error } = await supabase
+        .from("bill_lc_tracking")
+        .select(
+          "bill_number, current_lc, previous_lc, lc_changed_at, change_seen, last_checked",
+        )
+        .eq("user_id", userId);
+      if (error) throw error;
+      const map = {};
+      for (const row of data ?? []) {
+        map[row.bill_number] = {
+          current_lc: row.current_lc,
+          previous_lc: row.previous_lc,
+          lc_changed_at: row.lc_changed_at,
+          change_seen: row.change_seen,
+          last_checked: row.last_checked,
+        };
+      }
+      return map;
+    },
+
+    /** Upsert LC tracking for a single bill. Detects changes and records them. */
+    async upsert(billNumber, newLc) {
+      const userId = await getUserId();
+      const now = new Date().toISOString();
+
+      // Fetch existing record
+      const { data: existing } = await supabase
+        .from("bill_lc_tracking")
+        .select("current_lc, previous_lc, lc_changed_at, change_seen")
+        .eq("user_id", userId)
+        .eq("bill_number", billNumber)
+        .maybeSingle();
+
+      const oldLc = existing?.current_lc ?? null;
+      const isChange = oldLc !== null && newLc !== null && oldLc !== newLc;
+
+      const { error } = await supabase.from("bill_lc_tracking").upsert(
+        {
+          user_id: userId,
+          bill_number: billNumber,
+          current_lc: newLc,
+          previous_lc: isChange ? oldLc : (existing?.previous_lc ?? null),
+          lc_changed_at: isChange ? now : (existing?.lc_changed_at ?? null),
+          change_seen: isChange ? false : (existing?.change_seen ?? true),
+          last_checked: now,
+          updated_at: now,
+        },
+        { onConflict: "user_id,bill_number" },
+      );
+      if (error) throw error;
+    },
+
+    /** Batch upsert LC tracking data. More efficient than calling upsert one by one. */
+    async batchUpsert(entries) {
+      const userId = await getUserId();
+      const now = new Date().toISOString();
+
+      // Get all existing records first
+      const { data: existingRows } = await supabase
+        .from("bill_lc_tracking")
+        .select(
+          "bill_number, current_lc, previous_lc, lc_changed_at, change_seen",
+        )
+        .eq("user_id", userId);
+
+      const existingMap = {};
+      for (const row of existingRows ?? []) {
+        existingMap[row.bill_number] = row;
+      }
+
+      const upsertPayloads = [];
+      for (const { bill_number, lc_number } of entries) {
+        if (!lc_number) continue; // skip bills where we couldn't extract LC
+        const existing = existingMap[bill_number];
+        const oldLc = existing?.current_lc ?? null;
+        const isChange = oldLc !== null && oldLc !== lc_number;
+
+        upsertPayloads.push({
+          user_id: userId,
+          bill_number,
+          current_lc: lc_number,
+          previous_lc: isChange ? oldLc : (existing?.previous_lc ?? null),
+          lc_changed_at: isChange ? now : (existing?.lc_changed_at ?? null),
+          change_seen: isChange ? false : (existing?.change_seen ?? true),
+          last_checked: now,
+          updated_at: now,
+        });
+      }
+
+      if (upsertPayloads.length === 0) return;
+
+      const { error } = await supabase
+        .from("bill_lc_tracking")
+        .upsert(upsertPayloads, { onConflict: "user_id,bill_number" });
+      if (error) throw error;
+    },
+
+    /** Get count of unseen LC changes. */
+    async getUnseenCount() {
+      const userId = await getUserId();
+      const { count, error } = await supabase
+        .from("bill_lc_tracking")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .eq("change_seen", false);
+      if (error) throw error;
+      return count ?? 0;
+    },
+
+    /** Mark all unseen changes as seen. */
+    async markAllSeen() {
+      const userId = await getUserId();
+      const { error } = await supabase
+        .from("bill_lc_tracking")
+        .update({ change_seen: true, updated_at: new Date().toISOString() })
+        .eq("user_id", userId)
+        .eq("change_seen", false);
       if (error) throw error;
     },
   },

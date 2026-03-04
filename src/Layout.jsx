@@ -115,6 +115,15 @@ export default function Layout({ children, currentPageName }) {
     );
   }, [teamNotifications]);
 
+  // ── LC number change notification badge ────────────────────────────────────
+  const { data: lcUnseenCount = 0 } = useQuery({
+    queryKey: ["lcUnseenCount"],
+    queryFn: () => api.LcTracking.getUnseenCount(),
+    enabled: !!user,
+    refetchInterval: 60000, // poll every 60s
+    staleTime: 30000,
+  });
+
   return (
     <SidebarProvider>
       <div className="h-screen flex w-full bg-slate-50 overflow-hidden">
@@ -163,6 +172,12 @@ export default function Layout({ children, currentPageName }) {
                               {teamBadgeCount > 99 ? "99+" : teamBadgeCount}
                             </span>
                           )}
+                          {item.title === "Tracked Bills" &&
+                            lcUnseenCount > 0 && (
+                              <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center bg-red-500 text-white text-[11px] font-bold rounded-full leading-none">
+                                {lcUnseenCount > 99 ? "99+" : lcUnseenCount}
+                              </span>
+                            )}
                         </Link>
                       </SidebarMenuButton>
                     </SidebarMenuItem>

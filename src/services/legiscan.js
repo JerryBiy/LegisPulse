@@ -274,11 +274,19 @@ const extractTextFromPdfBytes = async (pdfData) => {
     });
 
     pdfDocument = await loadingTask.promise;
-    const maxPages = Math.min(pdfDocument.numPages || 0, 60);
+    const numPages = pdfDocument.numPages || 0;
+    if (numPages === 0) return "";
+    const maxPages = Math.min(numPages, 60);
     const pageTexts = [];
 
     for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
-      const page = await pdfDocument.getPage(pageNumber);
+      let page;
+      try {
+        page = await pdfDocument.getPage(pageNumber);
+      } catch {
+        // Skip pages that can't be loaded (malformed PDF, invalid page ref)
+        continue;
+      }
       try {
         const content = await page.getTextContent();
         const text = content.items
@@ -888,6 +896,135 @@ function mapLegiScanStatus(statusCode, statusDesc) {
     default:
       return "introduced";
   }
+}
+
+/**
+ * Extract LC (Legislative Counsel) number from bill text.
+ * Georgia LC numbers follow the pattern: LC XX YYYY with optional suffixes
+ * like S (substitute), ERS (engrossed), /AP (as passed), etc.
+ */
+export function extractLCNumber(text) {
+  if (!text) return null;
+  // Match "LC" followed by 2-3 digit session number, space, 3-5 digit draft number,
+  // with optional suffix letters (S, ERS, /AP, /SB, etc.) but NOT stray words
+  // like "House" or "Senate" that may follow on the next line.
+  const match = text.match(
+    /\bLC\s+\d{2,3}\s+\d{3,5}(?:\s*(?:\/\s*)?(?:S|ERS|ER|SUB|AP|SB|CS|HL|HR|EC|AM|ENR|RH|RS|PH|PS)\b)*/i,
+  );
+  if (!match) return null;
+  // Normalize whitespace in the matched LC number
+  return match[0].replace(/\s+/g, " ").trim().toUpperCase();
+}
+
+/**
+ * Fetch the LC number for a bill by examining its text content.
+ * Tries the newest text version first (HTML/text), then falls back to PDF parsing.
+ * @param {string|number} legiscanBillId - The LegiScan bill ID
+ * @returns {Promise<string|null>} The LC number or null
+ */
+export async function fetchBillLCNumber(legiscanBillId) {
+  if (!legiscanBillId) return null;
+
+  try {
+    const data = await legiscanRequest("getBill", { id: legiscanBillId });
+    const bill = data.bill || {};
+    const texts = Array.isArray(bill.texts) ? [...bill.texts] : [];
+
+    // Prefer newest text versions first
+    texts.sort((a, b) => {
+      const dateA = new Date(a?.date || 0).getTime() || 0;
+      const dateB = new Date(b?.date || 0).getTime() || 0;
+      return dateB - dateA;
+    });
+
+    // Try up to 2 text versions
+    const MAX_ATTEMPTS = 2;
+    let attempts = 0;
+
+    for (const textItem of texts) {
+      if (attempts >= MAX_ATTEMPTS) break;
+      const docId = textItem?.doc_id || textItem?.text_id || textItem?.id;
+      if (!docId) continue;
+      attempts += 1;
+
+      try {
+        const textResponse = await legiscanRequest("getBillText", {
+          id: docId,
+        });
+        const textPayload = textResponse?.text;
+
+        // Try extracting from decoded text/HTML content first (fast)
+        const textContent = extractTextFromBillTextPayload(textPayload);
+        if (textContent) {
+          const lc = extractLCNumber(textContent);
+          if (lc) return lc;
+        }
+
+        // Try parsing embedded PDF binary (slower)
+        const pdfBytes = extractPdfBytesFromBillTextPayload(textPayload);
+        if (pdfBytes?.length) {
+          const pdfText = await extractTextFromPdfBytes(pdfBytes);
+          if (pdfText) {
+            const lc = extractLCNumber(pdfText);
+            if (lc) return lc;
+          }
+        }
+      } catch (err) {
+        console.warn(`[LC] getBillText failed for doc ${docId}:`, err);
+      }
+    }
+
+    // Last resort: download PDF from URL and parse
+    try {
+      const { pdfLink } = await fetchBillPDFLink(legiscanBillId);
+      if (pdfLink && isLikelyPdfUrl(pdfLink)) {
+        const pdfText = await extractTextFromPdfUrl(pdfLink);
+        if (pdfText) {
+          const lc = extractLCNumber(pdfText);
+          if (lc) return lc;
+        }
+      }
+    } catch (err) {
+      console.warn("[LC] PDF fallback failed:", err);
+    }
+  } catch (err) {
+    console.warn(`[LC] Failed to fetch LC for bill ${legiscanBillId}:`, err);
+  }
+
+  return null;
+}
+
+/**
+ * Fetch LC numbers for multiple bills in parallel with concurrency limit.
+ * @param {Array<{bill_number: string, legiscan_id: string}>} bills
+ * @param {function} onProgress - callback(current, total)
+ * @returns {Promise<Record<string, string|null>>} map of bill_number → LC number
+ */
+export async function fetchLCNumbersForBills(bills, onProgress) {
+  const CONCURRENCY = 4;
+  const results = {};
+  let completed = 0;
+
+  for (let i = 0; i < bills.length; i += CONCURRENCY) {
+    const chunk = bills.slice(i, i + CONCURRENCY);
+    const chunkResults = await Promise.allSettled(
+      chunk.map(async (bill) => {
+        const lc = await fetchBillLCNumber(bill.legiscan_id);
+        return { bill_number: bill.bill_number, lc };
+      }),
+    );
+
+    for (const result of chunkResults) {
+      completed += 1;
+      if (result.status === "fulfilled") {
+        results[result.value.bill_number] = result.value.lc;
+      }
+    }
+
+    if (onProgress) onProgress(completed, bills.length);
+  }
+
+  return results;
 }
 
 /**

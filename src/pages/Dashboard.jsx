@@ -52,6 +52,12 @@ export default function Dashboard() {
   });
   const allTeams = allTeamData?.teams ?? [];
 
+  // ── LC Tracking data ────────────────────────────────────────────────────────
+  const { data: lcTrackingMap = {} } = useQuery({
+    queryKey: ["lcTracking"],
+    queryFn: () => api.LcTracking.getAll(),
+  });
+
   // Fetch bill numbers for every team in parallel
   const teamBillQueries = allTeams.map((t) => ({
     queryKey: ["teamBills", t.id],
@@ -439,9 +445,15 @@ export default function Dashboard() {
           </div>
           <BillSyncButton
             autoSync={!isLoading && rawBills.length === 0}
-            onSyncComplete={() =>
-              queryClient.invalidateQueries({ queryKey: ["bills"] })
-            }
+            onSyncComplete={() => {
+              queryClient.invalidateQueries({ queryKey: ["bills"] });
+              queryClient.invalidateQueries({ queryKey: ["teamBills"] });
+              queryClient.invalidateQueries({ queryKey: ["allTeamBills"] });
+              queryClient.invalidateQueries({ queryKey: ["teamBillMeta"] });
+              queryClient.invalidateQueries({ queryKey: ["personalBillMeta"] });
+              queryClient.invalidateQueries({ queryKey: ["lcTracking"] });
+              queryClient.invalidateQueries({ queryKey: ["lcUnseenCount"] });
+            }}
           />
         </div>
 
@@ -479,6 +491,7 @@ export default function Dashboard() {
                         teams={allTeams}
                         teamBillMap={teamBillMap}
                         onToggleTeamBill={handleToggleTeamBill}
+                        lcTracking={lcTrackingMap[bill.bill_number] || null}
                       />
                     </motion.div>
                   ))}
@@ -523,6 +536,9 @@ export default function Dashboard() {
         teams={allTeams}
         teamBillMap={teamBillMap}
         onToggleTeamBill={handleToggleTeamBill}
+        lcTracking={
+          selectedBill ? lcTrackingMap[selectedBill.bill_number] || null : null
+        }
       />
     </div>
   );

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/apiClient";
 import {
@@ -91,6 +91,28 @@ export default function TrackedBills() {
     queryKey: ["personalBillMeta"],
     queryFn: () => api.entities.UserBillMeta.getAll(),
   });
+
+  // ── LC Tracking data ───────────────────────────────────────────────────────
+  const { data: lcTrackingMap = {} } = useQuery({
+    queryKey: ["lcTracking"],
+    queryFn: () => api.LcTracking.getAll(),
+  });
+
+  // Mark unseen LC changes as seen when the page loads
+  useEffect(() => {
+    const markSeen = async () => {
+      try {
+        const unseenCount = await api.LcTracking.getUnseenCount();
+        if (unseenCount > 0) {
+          await api.LcTracking.markAllSeen();
+          queryClient.invalidateQueries({ queryKey: ["lcUnseenCount"] });
+        }
+      } catch {
+        /* non-critical */
+      }
+    };
+    markSeen();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const {
     height: listHeight,
@@ -287,6 +309,7 @@ export default function TrackedBills() {
                         bill_summary_notes: meta.bill_summary_notes ?? "",
                         assigneeName: null,
                       }}
+                      lcTracking={lcTrackingMap[bill.bill_number] || null}
                     />
                   );
                 })}
@@ -572,6 +595,9 @@ export default function TrackedBills() {
           selectedBill
             ? (fields) => handleMetaChange(selectedBill.bill_number, fields)
             : undefined
+        }
+        lcTracking={
+          selectedBill ? lcTrackingMap[selectedBill.bill_number] || null : null
         }
       />
     </div>

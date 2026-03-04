@@ -8,9 +8,14 @@ import {
   CheckCircle,
   AlertCircle,
   WrenchIcon,
+  FileSearch,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
-import { fetchGABills, isLegiScanConfigured } from "@/services/legiscan";
+import {
+  fetchGABills,
+  isLegiScanConfigured,
+  fetchLCNumbersForBills,
+} from "@/services/legiscan";
 
 function isMaintenance(msg) {
   return typeof msg === "string" && msg.toLowerCase().includes("maintenance");
@@ -19,6 +24,7 @@ function isMaintenance(msg) {
 export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState(null);
+  const [lcProgress, setLcProgress] = useState(null); // { current, total }
   const [progress, setProgress] = useState({
     current: 0,
     total: 0,
@@ -29,6 +35,7 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
   const syncBillsFromWebsite = async () => {
     setIsSyncing(true);
     setSyncStatus(null);
+    setLcProgress(null);
     setProgress({ current: 0, total: 0, newBills: 0 });
 
     try {
@@ -66,6 +73,67 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
         })),
       );
 
+      // ── LC Number Enrichment for tracked bills ──────────────────────────
+      try {
+        // Get personal tracked bill IDs
+        const profile = await api.auth.me().catch(() => null);
+        const personalTracked = profile?.tracked_bill_ids ?? [];
+
+        // Get team bill numbers
+        const allTeamData = await api.entities.Team.getAll().catch(() => ({
+          teams: [],
+        }));
+        const allTeams = allTeamData?.teams ?? [];
+        let teamBillNumbers = [];
+        for (const team of allTeams) {
+          try {
+            const nums = await api.entities.Team.getBillNumbers(team.id);
+            teamBillNumbers = teamBillNumbers.concat(nums);
+          } catch {
+            /* skip */
+          }
+        }
+
+        // Union of personal + team tracked bill numbers
+        const allTrackedNumbers = [
+          ...new Set([...personalTracked, ...teamBillNumbers]),
+        ];
+
+        // Find these bills in the freshly synced data (need legiscan_id)
+        const trackedBillsWithIds = bills.filter(
+          (b) => allTrackedNumbers.includes(b.bill_number) && b.legiscan_id,
+        );
+
+        if (trackedBillsWithIds.length > 0) {
+          setLcProgress({ current: 0, total: trackedBillsWithIds.length });
+
+          const lcResults = await fetchLCNumbersForBills(
+            trackedBillsWithIds,
+            (current, total) => setLcProgress({ current, total }),
+          );
+
+          // Build entries for batch operations
+          const lcEntries = Object.entries(lcResults)
+            .filter(([, lc]) => lc)
+            .map(([bill_number, lc_number]) => ({ bill_number, lc_number }));
+
+          if (lcEntries.length > 0) {
+            // Update bills table with LC numbers
+            await api.entities.Bill.updateLcNumbers(lcEntries);
+
+            // Update LC tracking (detects changes)
+            await api.LcTracking.batchUpsert(lcEntries);
+          }
+
+          console.log(
+            `[LC] Extracted LC numbers for ${lcEntries.length}/${trackedBillsWithIds.length} tracked bills`,
+          );
+        }
+      } catch (lcErr) {
+        console.warn("[LC] LC enrichment failed (non-fatal):", lcErr);
+      }
+      setLcProgress(null);
+
       setSyncStatus({
         success: true,
         message: `Synced ${bills.length} bills from LegiScan`,
@@ -92,6 +160,7 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
     }
 
     setIsSyncing(false);
+    setLcProgress(null);
   };
 
   useEffect(() => {
@@ -138,24 +207,39 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
             <div className="space-y-2">
               <div className="flex items-center justify-between text-sm">
                 <span className="text-blue-900 font-medium">
-                  Processing bills...
+                  {lcProgress
+                    ? "Fetching LC numbers for tracked bills..."
+                    : "Processing bills..."}
                 </span>
                 <Badge className="bg-blue-600 text-white">
-                  {progress.current} / {progress.total}
+                  {lcProgress
+                    ? `${lcProgress.current} / ${lcProgress.total}`
+                    : `${progress.current} / ${progress.total}`}
                 </Badge>
               </div>
               <div className="w-full bg-blue-200 rounded-full h-2">
                 <div
                   className="bg-blue-600 h-2 rounded-full transition-all duration-300"
                   style={{
-                    width: `${(progress.current / progress.total) * 100}%`,
+                    width: `${
+                      lcProgress
+                        ? (lcProgress.current / lcProgress.total) * 100
+                        : (progress.current / progress.total) * 100
+                    }%`,
                   }}
                 />
               </div>
-              {progress.newBills > 0 && (
-                <p className="text-xs text-blue-800">
-                  Found {progress.newBills} new bills
+              {lcProgress ? (
+                <p className="text-xs text-blue-800 flex items-center gap-1">
+                  <FileSearch className="w-3 h-3" />
+                  Extracting LC numbers from bill texts…
                 </p>
+              ) : (
+                progress.newBills > 0 && (
+                  <p className="text-xs text-blue-800">
+                    Found {progress.newBills} new bills
+                  </p>
+                )
               )}
             </div>
           </CardContent>
