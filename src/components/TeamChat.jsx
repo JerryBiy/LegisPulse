@@ -59,6 +59,10 @@ function initials(msg) {
   return (senderName(msg)[0] ?? "?").toUpperCase();
 }
 
+function senderAvatarUrl(msg) {
+  return msg.profiles?.avatar_url || "";
+}
+
 const AVATAR_COLOURS = [
   "bg-blue-100 text-blue-700",
   "bg-green-100 text-green-700",
@@ -475,11 +479,22 @@ export default function TeamChat({ teamId }) {
                     {/* Avatar */}
                     <div className="w-8 shrink-0">
                       {showHeader && (
-                        <div
-                          className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold ${avatarColour(msg.user_id)}`}
-                        >
-                          {initials(msg)}
-                        </div>
+                        <>
+                          {senderAvatarUrl(msg) ? (
+                            <img
+                              src={senderAvatarUrl(msg)}
+                              alt={senderName(msg)}
+                              className="w-8 h-8 rounded-full object-cover border border-slate-200"
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div
+                              className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold ${avatarColour(msg.user_id)}`}
+                            >
+                              {initials(msg)}
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
 

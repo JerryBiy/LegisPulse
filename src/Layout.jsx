@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { createPageUrl } from "@/utils";
 import { useAuth } from "@/lib/AuthContext";
 import { useQuery } from "@tanstack/react-query";
@@ -9,7 +9,6 @@ import {
   Mail,
   Building2,
   Bell,
-  User,
   Twitter,
   Settings,
   LogOut,
@@ -77,8 +76,12 @@ const navigationItems = [
   },
 ];
 
-export default function Layout({ children, currentPageName }) {
+export default function Layout({
+  children,
+  currentPageName: _currentPageName,
+}) {
   const location = useLocation();
+  const navigate = useNavigate();
   const { user, logout } = useAuth();
 
   const { data: bills = [] } = useQuery({
@@ -93,6 +96,11 @@ export default function Layout({ children, currentPageName }) {
 
   const totalBills = bills.length;
   const trackedCount = (userData?.tracked_bill_ids ?? []).length;
+  const displayName =
+    userData?.username?.trim() || userData?.name || user?.name || "User";
+  const displayEmail = userData?.email || user?.email || "";
+  const avatarUrl = userData?.avatar_url || "";
+  const avatarFallback = displayName.slice(0, 2).toUpperCase();
 
   // ── LC number change notification badges ────────────────────────────────────
   const { data: lcTrackingMap = {} } = useQuery({
@@ -244,18 +252,32 @@ export default function Layout({ children, currentPageName }) {
           </SidebarContent>
 
           <SidebarFooter className="border-t border-slate-200 p-4">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 bg-slate-100 rounded-full flex items-center justify-center shrink-0">
-                <User className="w-5 h-5 text-slate-600" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="font-semibold text-slate-900 text-sm truncate">
-                  {user?.name ?? "User"}
-                </p>
-                <p className="text-xs text-slate-500 truncate">
-                  {user?.email ?? ""}
-                </p>
-              </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => navigate(createPageUrl("Settings"))}
+                className="flex items-center gap-3 flex-1 min-w-0 rounded-lg px-2 py-1.5 text-left hover:bg-slate-100 transition-colors"
+                title="Open account settings"
+              >
+                <div className="w-9 h-9 rounded-full border border-slate-200 bg-slate-100 overflow-hidden shrink-0 flex items-center justify-center text-xs font-semibold text-slate-700">
+                  {avatarUrl ? (
+                    <img
+                      src={avatarUrl}
+                      alt={displayName}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    avatarFallback
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="font-semibold text-slate-900 text-sm truncate">
+                    {displayName}
+                  </p>
+                  <p className="text-xs text-slate-500 truncate">
+                    {displayEmail}
+                  </p>
+                </div>
+              </button>
               <button
                 onClick={logout}
                 title="Sign out"

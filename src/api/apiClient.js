@@ -64,6 +64,34 @@ const extractJsonObject = (text) => {
 export const api = {
   // ─── Auth ───────────────────────────────────────────────────────────────────
   auth: {
+    formatProfile(profile) {
+      return {
+        id: profile.id,
+        name: profile.name,
+        email: profile.email,
+        username: profile.username ?? "",
+        avatar_url: profile.avatar_url ?? "",
+        phone_number: profile.phone_number ?? "",
+        job_title: profile.job_title ?? "",
+        organization: profile.organization ?? "",
+        timezone: profile.timezone ?? "America/New_York",
+        bio: profile.bio ?? "",
+        tracked_bill_ids: profile.tracked_bill_ids ?? [],
+        twitter_notifications_enabled:
+          profile.twitter_notifications_enabled ?? true,
+        phone_notifications_enabled:
+          profile.phone_notifications_enabled ?? true,
+        email_notifications_enabled:
+          profile.email_notifications_enabled ?? true,
+        notification_phone: profile.notification_phone ?? "",
+        notification_preferences: profile.notification_preferences ?? {
+          email_updates: true,
+          bill_status_changes: true,
+          new_bills: true,
+        },
+      };
+    },
+
     async me() {
       const userId = await getUserId();
       const { data: session } = await supabase.auth.getSession();
@@ -80,12 +108,7 @@ export const api = {
 
       // Profile exists — return it as-is (preserves tracked_bill_ids)
       if (existing) {
-        return {
-          id: existing.id,
-          name: existing.name,
-          email: existing.email,
-          tracked_bill_ids: existing.tracked_bill_ids ?? [],
-        };
+        return this.formatProfile(existing);
       }
 
       // No profile yet (trigger missed) — create it now
@@ -98,26 +121,56 @@ export const api = {
             supabaseUser?.user_metadata?.name ??
             supabaseUser?.email?.split("@")[0] ??
             "User",
+          username: supabaseUser?.email?.split("@")[0] ?? null,
+          timezone: "America/New_York",
           tracked_bill_ids: [],
         })
         .select()
         .single();
       if (createError) throw createError;
-      return {
-        id: created.id,
-        name: created.name,
-        email: created.email,
-        tracked_bill_ids: [],
-      };
+      return this.formatProfile(created);
     },
 
     async updateMe(patch) {
       const userId = await getUserId();
+      const allowedFields = [
+        "name",
+        "email",
+        "username",
+        "avatar_url",
+        "phone_number",
+        "job_title",
+        "organization",
+        "timezone",
+        "bio",
+        "tracked_bill_ids",
+        "twitter_notifications_enabled",
+        "phone_notifications_enabled",
+        "email_notifications_enabled",
+        "notification_phone",
+        "notification_preferences",
+      ];
       const updatePayload = {};
-      if (patch.name !== undefined) updatePayload.name = patch.name;
-      if (patch.email !== undefined) updatePayload.email = patch.email;
-      if (patch.tracked_bill_ids !== undefined)
-        updatePayload.tracked_bill_ids = patch.tracked_bill_ids;
+      for (const field of allowedFields) {
+        if (patch[field] !== undefined) {
+          updatePayload[field] = patch[field];
+        }
+      }
+
+      if (
+        typeof updatePayload.username === "string" &&
+        updatePayload.username.trim() === ""
+      ) {
+        updatePayload.username = null;
+      }
+
+      // Keep legacy profile.name aligned so existing UI paths continue to show the same identity.
+      if (
+        updatePayload.username !== undefined &&
+        updatePayload.name === undefined
+      ) {
+        updatePayload.name = updatePayload.username;
+      }
 
       const { data, error } = await supabase
         .from("profiles")
@@ -126,12 +179,58 @@ export const api = {
         .select()
         .single();
       if (error) throw error;
-      return {
-        id: data.id,
-        name: data.name,
-        email: data.email,
-        tracked_bill_ids: data.tracked_bill_ids ?? [],
-      };
+      return this.formatProfile(data);
+    },
+
+    async updatePassword({ currentPassword, newPassword }) {
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+      if (userError) throw userError;
+      if (!user?.email) throw new Error("Unable to verify current user email.");
+
+      const { error: reauthError } = await supabase.auth.signInWithPassword({
+        email: user.email,
+        password: currentPassword,
+      });
+      if (reauthError) {
+        throw new Error("Current password is incorrect.");
+      }
+
+      const { error } = await supabase.auth.updateUser({
+        password: newPassword,
+      });
+      if (error) throw error;
+      return { success: true };
+    },
+
+    async uploadAvatar(file) {
+      const userId = await getUserId();
+      const fileName = (file?.name || "avatar").replace(
+        /[^a-zA-Z0-9_.-]/g,
+        "_",
+      );
+      const filePath = `${userId}/${Date.now()}-${fileName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from("profile-avatars")
+        .upload(filePath, file, {
+          upsert: false,
+          cacheControl: "3600",
+          contentType: file?.type || "image/jpeg",
+        });
+      if (uploadError) throw uploadError;
+
+      const { data: publicUrlData } = supabase.storage
+        .from("profile-avatars")
+        .getPublicUrl(filePath);
+
+      if (!publicUrlData?.publicUrl) {
+        throw new Error("Failed to generate public URL for uploaded avatar.");
+      }
+
+      return { publicUrl: publicUrlData.publicUrl, filePath };
     },
 
     async logout() {
@@ -802,7 +901,11 @@ export const api = {
         if (error) throw error;
         return (data ?? []).map((m) => ({
           ...m,
-          profiles: { name: m.sender_name, email: m.sender_email },
+          profiles: {
+            name: m.sender_name,
+            email: m.sender_email,
+            avatar_url: m.sender_avatar_url,
+          },
         }));
       },
 
@@ -856,7 +959,11 @@ export const api = {
         if (!row) throw new Error("Message was not saved.");
         return {
           ...row,
-          profiles: { name: row.sender_name, email: row.sender_email },
+          profiles: {
+            name: row.sender_name,
+            email: row.sender_email,
+            avatar_url: row.sender_avatar_url,
+          },
         };
       },
 

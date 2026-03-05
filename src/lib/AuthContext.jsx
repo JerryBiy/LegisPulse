@@ -10,14 +10,32 @@ export const AuthProvider = ({ children }) => {
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
   const [authError, setAuthError] = useState(null);
 
+  const isEmailVerified = (supabaseUser) =>
+    Boolean(supabaseUser?.email_confirmed_at);
+
+  const forceSignOutUnverified = async () => {
+    await supabase.auth.signOut();
+    setUser(null);
+    setIsAuthenticated(false);
+    setAuthError({
+      type: "email_not_verified",
+      message:
+        "Please verify your email address before signing in. Check your inbox for the confirmation link.",
+    });
+  };
+
   useEffect(() => {
     // Get initial session
     supabase.auth
       .getSession()
       .then(({ data: { session } }) => {
         if (session?.user) {
-          setUser(buildUser(session.user));
-          setIsAuthenticated(true);
+          if (isEmailVerified(session.user)) {
+            setUser(buildUser(session.user));
+            setIsAuthenticated(true);
+          } else {
+            forceSignOutUnverified();
+          }
         }
         setIsLoadingAuth(false);
       })
@@ -30,9 +48,13 @@ export const AuthProvider = ({ children }) => {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
       if (session?.user) {
-        setUser(buildUser(session.user));
-        setIsAuthenticated(true);
-        setAuthError(null);
+        if (isEmailVerified(session.user)) {
+          setUser(buildUser(session.user));
+          setIsAuthenticated(true);
+          setAuthError(null);
+        } else {
+          forceSignOutUnverified();
+        }
       } else {
         setUser(null);
         setIsAuthenticated(false);
@@ -70,6 +92,14 @@ export const AuthProvider = ({ children }) => {
       setAuthError({ type: "login_failed", message: error.message });
       throw error;
     }
+
+    if (!isEmailVerified(data?.user)) {
+      await forceSignOutUnverified();
+      throw new Error(
+        "Please verify your email address before signing in. Check your inbox for the confirmation link.",
+      );
+    }
+
     return data;
   };
 

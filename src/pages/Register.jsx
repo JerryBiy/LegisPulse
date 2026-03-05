@@ -19,6 +19,25 @@ export default function Register() {
   const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
 
+  const validateStrongPassword = (value) => {
+    if (value.length < 12) {
+      return "Password must be at least 12 characters.";
+    }
+    if (!/[a-z]/.test(value)) {
+      return "Password must include at least one lowercase letter.";
+    }
+    if (!/[A-Z]/.test(value)) {
+      return "Password must include at least one uppercase letter.";
+    }
+    if (!/\d/.test(value)) {
+      return "Password must include at least one number.";
+    }
+    if (!/[^A-Za-z0-9]/.test(value)) {
+      return "Password must include at least one special character.";
+    }
+    return null;
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError(null);
@@ -27,8 +46,9 @@ export default function Register() {
       setError("Passwords do not match.");
       return;
     }
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters.");
+    const passwordError = validateStrongPassword(password);
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
 
@@ -131,11 +151,15 @@ export default function Register() {
                   <Input
                     id="password"
                     type="password"
-                    placeholder="Min. 6 characters"
+                    placeholder="Min. 12 chars, upper/lower/number/symbol"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
                   />
+                  <p className="text-xs text-slate-500">
+                    Use 12+ characters with uppercase, lowercase, number, and
+                    symbol.
+                  </p>
                 </div>
 
                 <div className="space-y-1.5">
