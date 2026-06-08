@@ -199,14 +199,16 @@ export default function Team() {
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div ref={pageRef} className="min-h-full bg-slate-50">
-      <div className="max-w-7xl mx-auto p-6 space-y-6">
+      <div className="max-w-7xl mx-auto p-4 sm:p-6 space-y-6">
         {/* Page header */}
-        <div className="flex items-center gap-4">
-          <div className="p-3 bg-blue-100 rounded-lg">
+        <div className="flex flex-wrap items-center gap-3 sm:gap-4">
+          <div className="p-3 bg-blue-100 rounded-lg shrink-0">
             <Users className="w-6 h-6 text-blue-600" />
           </div>
           <div className="flex-1 min-w-0">
-            <h1 className="text-3xl font-bold text-slate-900">Teams</h1>
+            <h1 className="text-2xl sm:text-3xl font-bold text-slate-900">
+              Teams
+            </h1>
             <p className="text-slate-600 mt-1">
               {hasTeams
                 ? `You are in ${teams.length} team${teams.length !== 1 ? "s" : ""}`
@@ -217,7 +219,7 @@ export default function Team() {
             <Button
               size="sm"
               variant={showCreateJoin ? "secondary" : "default"}
-              className="gap-2"
+              className="gap-2 shrink-0"
               onClick={() => setShowCreateJoin((v) => !v)}
             >
               <Plus className="w-4 h-4" />

@@ -1,4 +1,10 @@
-import React, { useState, useMemo, useCallback, useEffect } from "react";
+import React, {
+  useState,
+  useMemo,
+  useCallback,
+  useEffect,
+  useRef,
+} from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/apiClient";
 import {
@@ -41,8 +47,16 @@ import {
 import BillCard from "../components/bills/BillCard";
 import BillDetailsModal from "../components/bills/BillDetailsModal";
 import { useResizableHeight, ResizeHandle } from "@/hooks/use-resizable-height";
+import { fetchBillSponsors } from "@/services/legiscan";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+const hasSponsorInfo = (bill) => {
+  if (!bill) return false;
+  if (Array.isArray(bill.sponsors) && bill.sponsors.length > 0) return true;
+  const s = String(bill.sponsor || "").trim();
+  return s.length > 0 && s.toLowerCase() !== "unknown";
+};
 
 const PARTY_COLORS = {
   D: "bg-indigo-500 text-white",
@@ -155,8 +169,102 @@ export default function TrackedBills() {
     return [...byNumber.values()];
   }, [allBills, sharedBillData]);
 
-  const trackedBills = mergedBills.filter((bill) =>
-    effectiveTrackedBillNumbers.includes(bill.bill_number),
+  const trackedBills = useMemo(
+    () =>
+      mergedBills.filter((bill) =>
+        effectiveTrackedBillNumbers.includes(bill.bill_number),
+      ),
+    [mergedBills, effectiveTrackedBillNumbers],
+  );
+
+  // ── Background sponsor enrichment ──────────────────────────────────────────
+  // Bills cached in the DB can be missing sponsor data (shows "Unknown" until
+  // the detail modal is opened). Resolve sponsors for visible tracked bills in
+  // the background. Results are kept in a local map keyed by bill_number so the
+  // overlay works even for team-shared bills (whose rows belong to a teammate
+  // and therefore can't be written back through our own RLS-scoped update).
+  const [resolvedSponsors, setResolvedSponsors] = useState({});
+  const sponsorFetchAttempted = useRef(new Set());
+  useEffect(() => {
+    const needing = trackedBills.filter(
+      (b) =>
+        b?.bill_number &&
+        b?.legiscan_id &&
+        !hasSponsorInfo(b) &&
+        !resolvedSponsors[b.bill_number] &&
+        !sponsorFetchAttempted.current.has(b.bill_number),
+    );
+    if (needing.length === 0) return;
+
+    let cancelled = false;
+    const CONCURRENCY = 4;
+
+    (async () => {
+      for (let i = 0; i < needing.length; i += CONCURRENCY) {
+        if (cancelled) return;
+        const chunk = needing.slice(i, i + CONCURRENCY);
+        await Promise.allSettled(
+          chunk.map(async (bill) => {
+            sponsorFetchAttempted.current.add(bill.bill_number);
+            try {
+              const { sponsors, primarySponsor, coSponsors, party } =
+                await fetchBillSponsors(bill.legiscan_id);
+              if (cancelled || !primarySponsor) return;
+
+              // Update the local overlay so the card fills in immediately,
+              // regardless of which table the bill row came from.
+              setResolvedSponsors((prev) => ({
+                ...prev,
+                [bill.bill_number]: {
+                  sponsor: primarySponsor,
+                  sponsors,
+                  co_sponsors: coSponsors,
+                  sponsor_party: party || bill.sponsor_party || null,
+                },
+              }));
+
+              // Best-effort: persist onto our own bill row if we own one.
+              if (bill.id) {
+                const patch = {
+                  sponsor: primarySponsor,
+                  sponsors,
+                  co_sponsors: coSponsors,
+                };
+                if (party && !bill.sponsor_party) patch.sponsor_party = party;
+                api.entities.Bill.update(bill.id, patch).catch(() => {
+                  /* row may belong to a teammate; overlay still applies */
+                });
+              }
+            } catch {
+              /* non-critical: leave as Unknown, will retry next mount */
+            }
+          }),
+        );
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [trackedBills, resolvedSponsors]);
+
+  // Overlay resolved sponsors onto the tracked bills for display.
+  const enrichedBills = useMemo(
+    () =>
+      trackedBills.map((b) => {
+        const r = resolvedSponsors[b.bill_number];
+        if (r && !hasSponsorInfo(b)) {
+          return {
+            ...b,
+            sponsor: r.sponsor,
+            sponsors: r.sponsors,
+            co_sponsors: r.co_sponsors,
+            sponsor_party: b.sponsor_party || r.sponsor_party,
+          };
+        }
+        return b;
+      }),
+    [trackedBills, resolvedSponsors],
   );
 
   // Mark unseen LC changes as seen for personal tracked bills when the page loads
@@ -255,10 +363,10 @@ export default function TrackedBills() {
 
   // Sort bills: LC-changed bills (active) first, then normal sort
   const sortedBills = useMemo(() => {
-    const withLcChange = trackedBills.filter((b) =>
+    const withLcChange = enrichedBills.filter((b) =>
       isActiveLcChange(lcTrackingMap[b.bill_number]),
     );
-    const withoutLcChange = trackedBills.filter(
+    const withoutLcChange = enrichedBills.filter(
       (b) => !isActiveLcChange(lcTrackingMap[b.bill_number]),
     );
     // Apply normal sort to each group
@@ -286,7 +394,7 @@ export default function TrackedBills() {
       return 0;
     };
     return [...withLcChange.sort(sortFn), ...withoutLcChange.sort(sortFn)];
-  }, [trackedBills, listSort, layout, personalMeta, lcTrackingMap]);
+  }, [enrichedBills, listSort, layout, personalMeta, lcTrackingMap]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (

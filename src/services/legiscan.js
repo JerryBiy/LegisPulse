@@ -826,6 +826,25 @@ export async function fetchGABills(sessionId) {
 }
 
 /**
+ * Fetch just the sponsor info for a bill (single getBill call, no text loop).
+ * Returns { sponsors, primarySponsor, coSponsors, party } — empty when none.
+ */
+export async function fetchBillSponsors(legiscanBillId) {
+  if (!legiscanBillId) {
+    return { sponsors: [], primarySponsor: null, coSponsors: [], party: null };
+  }
+  const data = await legiscanRequest("getBill", { id: legiscanBillId });
+  const rawSponsors = data.bill?.sponsors;
+  const sponsors = extractSponsorNames(rawSponsors);
+  return {
+    sponsors,
+    primarySponsor: sponsors[0] || null,
+    coSponsors: sponsors.slice(1),
+    party: extractPrimaryParty(rawSponsors),
+  };
+}
+
+/**
  * Get detailed bill information
  */
 export async function fetchBillDetails(billId) {

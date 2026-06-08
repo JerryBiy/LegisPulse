@@ -140,6 +140,11 @@ export default function BillCard({
             <div>
               <h3 className="font-bold text-lg text-slate-900">
                 {bill.bill_number}
+                {(bill.lc_number || lcTracking?.current_lc) && (
+                  <span className="ml-2 text-xs font-mono font-normal text-slate-400">
+                    {bill.lc_number || lcTracking?.current_lc}
+                  </span>
+                )}
               </h3>
               <p className="text-sm text-slate-500 font-medium">
                 {bill.chamber === "house" ? "House" : "Senate"} •{" "}
@@ -195,32 +200,23 @@ export default function BillCard({
           <h4 className="font-semibold text-slate-900 mb-2 line-clamp-2">
             {bill.title}
           </h4>
-          {(bill.lc_number || lcTracking?.current_lc) && (
-            <div className="space-y-1">
-              <p className="text-sm text-slate-500 font-mono">
-                {bill.lc_number || lcTracking?.current_lc}
-              </p>
-              {lcTracking?.previous_lc &&
-                lcTracking.previous_lc !== lcTracking.current_lc &&
-                lcTracking.lc_changed_at &&
-                Date.now() - new Date(lcTracking.lc_changed_at).getTime() <
-                  24 * 60 * 60 * 1000 && (
-                  <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-50 border border-amber-200 text-xs">
-                    <RefreshCw className="w-3 h-3 text-amber-600 shrink-0" />
-                    <span className="text-amber-800 font-medium">
-                      LC Changed:
-                    </span>
-                    <span className="font-mono text-amber-700">
-                      {lcTracking.previous_lc}
-                    </span>
-                    <ArrowRight className="w-3 h-3 text-amber-500 shrink-0" />
-                    <span className="font-mono text-amber-900 font-semibold">
-                      {lcTracking.current_lc}
-                    </span>
-                  </div>
-                )}
-            </div>
-          )}
+          {lcTracking?.previous_lc &&
+            lcTracking.previous_lc !== lcTracking.current_lc &&
+            lcTracking.lc_changed_at &&
+            Date.now() - new Date(lcTracking.lc_changed_at).getTime() <
+              24 * 60 * 60 * 1000 && (
+              <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-50 border border-amber-200 text-xs">
+                <RefreshCw className="w-3 h-3 text-amber-600 shrink-0" />
+                <span className="text-amber-800 font-medium">LC Changed:</span>
+                <span className="font-mono text-amber-700">
+                  {lcTracking.previous_lc}
+                </span>
+                <ArrowRight className="w-3 h-3 text-amber-500 shrink-0" />
+                <span className="font-mono text-amber-900 font-semibold">
+                  {lcTracking.current_lc}
+                </span>
+              </div>
+            )}
         </div>
 
         <div className="flex items-center gap-2 text-sm">

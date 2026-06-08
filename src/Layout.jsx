@@ -15,6 +15,7 @@ import {
   Users,
   CalendarDays,
   Landmark,
+  Menu,
 } from "lucide-react";
 import {
   Sidebar,
@@ -28,7 +29,7 @@ import {
   SidebarHeader,
   SidebarFooter,
   SidebarProvider,
-  SidebarTrigger,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import { Badge } from "@/components/ui/badge";
 
@@ -83,13 +84,24 @@ const navigationItems = [
   },
 ];
 
-export default function Layout({
-  children,
-  currentPageName: _currentPageName,
-}) {
+export default function Layout({ children, currentPageName }) {
+  return (
+    <SidebarProvider>
+      <AppLayout currentPageName={currentPageName}>{children}</AppLayout>
+    </SidebarProvider>
+  );
+}
+
+function AppLayout({ children, currentPageName: _currentPageName }) {
   const location = useLocation();
   const navigate = useNavigate();
   const { user, logout } = useAuth();
+  const { isMobile, setOpenMobile, toggleSidebar } = useSidebar();
+
+  // Close the mobile drawer after navigating to a tab.
+  const closeMobileSidebar = React.useCallback(() => {
+    if (isMobile) setOpenMobile(false);
+  }, [isMobile, setOpenMobile]);
 
   const { data: bills = [] } = useQuery({
     queryKey: ["bills"],
@@ -166,157 +178,161 @@ export default function Layout({
   }, [teamNotifications, lcUnseenTeamCount]);
 
   return (
-    <SidebarProvider>
-      <div className="h-screen flex w-full bg-slate-50 overflow-hidden">
-        <Sidebar className="border-r border-slate-200 bg-white">
-          <SidebarHeader className="border-b border-slate-200 p-3">
-            <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 bg-gradient-to-br from-blue-600 to-blue-700 rounded-lg flex items-center justify-center shadow-sm shrink-0">
-                <Building2 className="w-5 h-5 text-white" />
-              </div>
-              <div className="min-w-0">
-                <h2 className="font-bold text-slate-900 text-base leading-tight">
-                  LegisPulse
-                </h2>
-                <p className="text-[11px] text-slate-500 font-medium leading-tight">
-                  Georgia Legislature
-                </p>
-              </div>
+    <div className="h-screen flex w-full bg-slate-50 overflow-hidden">
+      <Sidebar className="border-r border-slate-200 bg-white">
+        <SidebarHeader className="border-b border-slate-200 p-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 bg-gradient-to-br from-blue-600 to-blue-700 rounded-lg flex items-center justify-center shadow-sm shrink-0">
+              <Building2 className="w-5 h-5 text-white" />
             </div>
-          </SidebarHeader>
+            <div className="min-w-0">
+              <h2 className="font-bold text-slate-900 text-base leading-tight">
+                LegisPulse
+              </h2>
+              <p className="text-[11px] text-slate-500 font-medium leading-tight">
+                Georgia Legislature
+              </p>
+            </div>
+          </div>
+        </SidebarHeader>
 
-          <SidebarContent className="px-3 py-2 overflow-hidden">
-            <SidebarGroup className="p-0">
-              <SidebarGroupLabel className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider px-2 py-1">
-                Navigation
-              </SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu className="space-y-0.5">
-                  {navigationItems.map((item) => (
-                    <SidebarMenuItem key={item.title}>
-                      <SidebarMenuButton
-                        asChild
-                        className={`hover:bg-blue-50 hover:text-blue-700 transition-all duration-200 rounded-lg group ${
-                          location.pathname === item.url
-                            ? "bg-blue-50 text-blue-700 border-l-3 border-blue-600"
-                            : "text-slate-700"
-                        }`}
+        <SidebarContent className="px-3 py-2 overflow-hidden">
+          <SidebarGroup className="p-0">
+            <SidebarGroupLabel className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider px-2 py-1">
+              Navigation
+            </SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu className="space-y-0.5">
+                {navigationItems.map((item) => (
+                  <SidebarMenuItem key={item.title}>
+                    <SidebarMenuButton
+                      asChild
+                      className={`hover:bg-blue-50 hover:text-blue-700 transition-all duration-200 rounded-lg group ${
+                        location.pathname === item.url
+                          ? "bg-blue-50 text-blue-700 border-l-3 border-blue-600"
+                          : "text-slate-700"
+                      }`}
+                    >
+                      <Link
+                        to={item.url}
+                        onClick={closeMobileSidebar}
+                        className="flex items-center gap-3 px-3 py-1.5"
                       >
-                        <Link
-                          to={item.url}
-                          className="flex items-center gap-3 px-3 py-1.5"
-                        >
-                          <item.icon className="w-[18px] h-[18px]" />
-                          <span className="font-semibold text-sm flex-1">
-                            {item.title}
+                        <item.icon className="w-[18px] h-[18px]" />
+                        <span className="font-semibold text-sm flex-1">
+                          {item.title}
+                        </span>
+                        {item.title === "Team" && teamBadgeCount > 0 && (
+                          <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center bg-red-500 text-white text-[11px] font-bold rounded-full leading-none">
+                            {teamBadgeCount > 99 ? "99+" : teamBadgeCount}
                           </span>
-                          {item.title === "Team" && teamBadgeCount > 0 && (
+                        )}
+                        {item.title === "Tracked Bills" &&
+                          lcUnseenPersonalCount > 0 && (
                             <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center bg-red-500 text-white text-[11px] font-bold rounded-full leading-none">
-                              {teamBadgeCount > 99 ? "99+" : teamBadgeCount}
+                              {lcUnseenPersonalCount > 99
+                                ? "99+"
+                                : lcUnseenPersonalCount}
                             </span>
                           )}
-                          {item.title === "Tracked Bills" &&
-                            lcUnseenPersonalCount > 0 && (
-                              <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center bg-red-500 text-white text-[11px] font-bold rounded-full leading-none">
-                                {lcUnseenPersonalCount > 99
-                                  ? "99+"
-                                  : lcUnseenPersonalCount}
-                              </span>
-                            )}
-                        </Link>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
 
-            <SidebarGroup className="mt-3 p-0">
-              <SidebarGroupLabel className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider px-2 py-1">
-                Quick Stats
-              </SidebarGroupLabel>
-              <SidebarGroupContent>
-                <div className="px-3 space-y-1.5">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-600 font-medium">
-                      Session 2025-2026
-                    </span>
-                    <Badge
-                      variant="outline"
-                      className="text-[10px] px-1.5 py-0"
-                    >
-                      Active
-                    </Badge>
-                  </div>
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-600">Total Bills</span>
-                    <span className="font-bold text-slate-900">
-                      {totalBills}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-600">Tracked</span>
-                    <span className="font-bold text-blue-600">
-                      {trackedCount}
-                    </span>
-                  </div>
+          <SidebarGroup className="mt-3 p-0">
+            <SidebarGroupLabel className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider px-2 py-1">
+              Quick Stats
+            </SidebarGroupLabel>
+            <SidebarGroupContent>
+              <div className="px-3 space-y-1.5">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-slate-600 font-medium">
+                    Session 2025-2026
+                  </span>
+                  <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                    Active
+                  </Badge>
                 </div>
-              </SidebarGroupContent>
-            </SidebarGroup>
-          </SidebarContent>
-
-          <SidebarFooter className="border-t border-slate-200 p-3">
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => navigate(createPageUrl("Settings"))}
-                className="flex items-center gap-3 flex-1 min-w-0 rounded-lg px-2 py-1.5 text-left hover:bg-slate-100 transition-colors"
-                title="Open account settings"
-              >
-                <div className="w-9 h-9 rounded-full border border-slate-200 bg-slate-100 overflow-hidden shrink-0 flex items-center justify-center text-xs font-semibold text-slate-700">
-                  {avatarUrl ? (
-                    <img
-                      src={avatarUrl}
-                      alt={displayName}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    avatarFallback
-                  )}
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-slate-600">Total Bills</span>
+                  <span className="font-bold text-slate-900">{totalBills}</span>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="font-semibold text-slate-900 text-sm truncate">
-                    {displayName}
-                  </p>
-                  <p className="text-xs text-slate-500 truncate">
-                    {displayEmail}
-                  </p>
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-slate-600">Tracked</span>
+                  <span className="font-bold text-blue-600">
+                    {trackedCount}
+                  </span>
                 </div>
-              </button>
-              <button
-                onClick={logout}
-                title="Sign out"
-                className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors"
-              >
-                <LogOut className="w-4 h-4" />
-              </button>
-            </div>
-          </SidebarFooter>
-        </Sidebar>
-
-        <main className="flex-1 flex flex-col min-h-0">
-          <header className="bg-white border-b border-slate-200 px-6 py-4 md:hidden">
-            <div className="flex items-center gap-4">
-              <SidebarTrigger className="hover:bg-slate-100 p-2 rounded-lg transition-colors" />
-              <div className="flex items-center gap-2">
-                <Building2 className="w-5 h-5 text-blue-600" />
-                <h1 className="text-lg font-bold text-slate-900">LegisPulse</h1>
               </div>
-            </div>
-          </header>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        </SidebarContent>
 
-          <div className="flex-1 overflow-auto min-h-0">{children}</div>
-        </main>
-      </div>
-    </SidebarProvider>
+        <SidebarFooter className="border-t border-slate-200 p-3">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                closeMobileSidebar();
+                navigate(createPageUrl("Settings"));
+              }}
+              className="flex items-center gap-3 flex-1 min-w-0 rounded-lg px-2 py-1.5 text-left hover:bg-slate-100 transition-colors"
+              title="Open account settings"
+            >
+              <div className="w-9 h-9 rounded-full border border-slate-200 bg-slate-100 overflow-hidden shrink-0 flex items-center justify-center text-xs font-semibold text-slate-700">
+                {avatarUrl ? (
+                  <img
+                    src={avatarUrl}
+                    alt={displayName}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  avatarFallback
+                )}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="font-semibold text-slate-900 text-sm truncate">
+                  {displayName}
+                </p>
+                <p className="text-xs text-slate-500 truncate">
+                  {displayEmail}
+                </p>
+              </div>
+            </button>
+            <button
+              onClick={logout}
+              title="Sign out"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        </SidebarFooter>
+      </Sidebar>
+
+      <main className="flex-1 flex flex-col min-h-0">
+        <header className="bg-white border-b border-slate-200 px-4 py-3 md:hidden">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              aria-label="Open navigation menu"
+              className="inline-flex h-10 w-10 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 active:bg-slate-200 transition-colors"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+            <div className="flex items-center gap-2">
+              <Building2 className="w-5 h-5 text-blue-600" />
+              <h1 className="text-lg font-bold text-slate-900">LegisPulse</h1>
+            </div>
+          </div>
+        </header>
+
+        <div className="flex-1 overflow-auto min-h-0">{children}</div>
+      </main>
+    </div>
   );
 }
