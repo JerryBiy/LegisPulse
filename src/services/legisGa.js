@@ -102,6 +102,65 @@ export async function getCurrentSessionId() {
   return cachedCurrentSessionId;
 }
 
+// ─── Bill versions (LC / substitute tracking) ────────────────
+// Version names carry the LC number + substitute/chamber label, e.g.
+// "Sen Ctee Sub :LC 59 0475S", "LC 33 9902S/RCS", "LC 44 3392/a".
+const VERSION_LC_REGEX = /LC\s+\d+\s+\d+[A-Za-z]*(?:\/[A-Za-z]+)?/i;
+
+function extractVersionLc(name) {
+  const m = String(name || "").match(VERSION_LC_REGEX);
+  if (!m) return null;
+  return m[0].replace(/\s+/g, " ").trim().toUpperCase();
+}
+
+// Identify which chamber a version belongs to. Prefer an explicit
+// committee-substitute label ("Sen Ctee Sub", "Hou Ctee Sub"); otherwise
+// inspect the LC substitute suffix. The indicator is the trailing letters —
+// after the last "/" when present (e.g. "9886S/HS" → HS → House,
+// "9902S/RCS" → RCS → Senate), else the letters right after the number.
+// "/A" (amendment) carries no chamber.
+function versionChamber(name) {
+  const n = String(name || "").toLowerCase();
+  if (/\bsen(ate)?\b/.test(n)) return "Senate";
+  if (/\bhou(se)?\b/.test(n)) return "House";
+  const lc = extractVersionLc(name);
+  if (!lc) return null;
+  let sfx = "";
+  if (lc.includes("/")) {
+    sfx = lc.slice(lc.lastIndexOf("/") + 1).toUpperCase();
+  } else {
+    const m = lc.match(/\d+([A-Z]+)\s*$/i);
+    sfx = m ? m[1].toUpperCase() : "";
+  }
+  if (sfx.includes("H")) return "House";
+  if (sfx.includes("S")) return "Senate";
+  return null;
+}
+
+/**
+ * Fetch the LC-bearing versions for a bill from legis.ga.gov, oldest first.
+ * Each entry = { versionNumber, name, lc, chamber, isCurrent }. Floor
+ * amendments and other non-LC entries are excluded so the list maps 1:1
+ * to LegiScan's substantive text versions.
+ *
+ * @param {number} legislationId legis.ga.gov internal legislation id
+ */
+export async function fetchBillVersionsGa(legislationId) {
+  if (!legislationId) return [];
+  const data = await apiFetch(`/legislation/Detail/${legislationId}`);
+  const versions = Array.isArray(data?.versions) ? data.versions : [];
+  return versions
+    .map((v) => ({
+      versionNumber: v?.versionNumber ?? 0,
+      name: String(v?.name ?? ""),
+      lc: extractVersionLc(v?.name),
+      chamber: versionChamber(v?.name),
+      isCurrent: !!v?.isCurrent,
+    }))
+    .filter((v) => v.lc)
+    .sort((a, b) => a.versionNumber - b.versionNumber);
+}
+
 // ─── Committees ──────────────────────────────────────────────
 
 /**

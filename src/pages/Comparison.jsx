@@ -32,6 +32,7 @@ import {
   findBillInSession,
   isLegiScanConfigured,
 } from "@/services/legiscan";
+import { fetchBillVersionsGa } from "@/services/legisGa";
 
 // ── Chamber / LC helpers ─────────────────────────────────────
 // Bill numbers look like "HB1020", "SB45", "HR12", "SR3".
@@ -56,6 +57,24 @@ function lcSubstituteChamber(lc) {
 
 const safeArr = (v) =>
   Array.isArray(v) ? v.filter((x) => typeof x === "string" && x.trim()) : [];
+
+// Attach authoritative legis.ga.gov LC numbers + chamber to LegiScan text
+// versions. LegiScan versions arrive newest-first; legis.ga.gov LC versions
+// arrive oldest-first. The substantive versions map 1:1, so we align them by
+// recency (newest ↔ newest) — robust even if one source is missing an older
+// version. Each returned version gains { lc, chamber, versionName }.
+function mergeGaLcIntoVersions(legiscanNewestFirst, gaOldestFirst) {
+  const gaNewestFirst = [...(gaOldestFirst || [])].reverse();
+  return (legiscanNewestFirst || []).map((v, i) => {
+    const ga = gaNewestFirst[i];
+    return {
+      ...v,
+      lc: ga?.lc || null,
+      chamber: ga?.chamber || null,
+      versionName: ga?.name || null,
+    };
+  });
+}
 
 // ── Reusable bill search box ─────────────────────────────────
 function BillSearch({ placeholder, sessionId, value, onSelect, onClear }) {
@@ -460,7 +479,6 @@ export default function Comparison() {
           <TabsContent value="versions" className="mt-4">
             <VersionsMode
               sessionId={currentSessionId}
-              lcFor={lcFor}
               onCompare={runCompare}
               busy={isComparing}
             />
@@ -532,11 +550,23 @@ function VersionsMode({ sessionId, lcFor, onCompare, busy }) {
     if (!bill) return;
     let cancelled = false;
     setLoadingVersions(true);
-    fetchBillTextVersionsForAI(bill.legiscan_id, 8)
-      .then((vs) => {
+    // Fetch LegiScan text versions (for the diff) and the authoritative
+    // legis.ga.gov LC-labeled versions in parallel, then merge so each
+    // version carries its own LC number + chamber.
+    Promise.all([
+      fetchBillTextVersionsForAI(bill.legiscan_id, 8),
+      api.LcTracking.getLegislationId(bill.bill_number)
+        .then((lid) => (lid ? fetchBillVersionsGa(lid) : []))
+        .catch((e) => {
+          console.warn("legis.ga.gov versions failed", e);
+          return [];
+        }),
+    ])
+      .then(([vs, gaVersions]) => {
         if (cancelled) return;
-        setVersions(vs);
-        if (vs.length >= 2) {
+        const merged = mergeGaLcIntoVersions(vs, gaVersions);
+        setVersions(merged);
+        if (merged.length >= 2) {
           setAIdx("1"); // older of the two newest
           setBIdx("0"); // newest
         }
@@ -551,7 +581,7 @@ function VersionsMode({ sessionId, lcFor, onCompare, busy }) {
   }, [bill]);
 
   const versionLabel = (v, i) =>
-    `${v.type || "Version"}${v.date ? ` — ${v.date}` : ""}${i === 0 ? " (newest)" : ""}`;
+    `${v.lc || v.type || "Version"}${v.date ? ` — ${v.date}` : ""}${i === 0 ? " (newest)" : ""}`;
 
   const handleCompare = () => {
     setLocalError("");
@@ -561,22 +591,21 @@ function VersionsMode({ sessionId, lcFor, onCompare, busy }) {
     }
     const vA = versions[Number(aIdx)];
     const vB = versions[Number(bIdx)];
-    const lc = lcFor(bill.bill_number);
     const origin = originChamberFromNumber(bill.bill_number);
     const sideA = {
-      label: `${bill.bill_number} — ${vA.type || "Version"}`,
-      lc: lc?.previous_lc || null,
-      chamber: origin,
+      label: `${bill.bill_number} — ${vA.lc || vA.type || "Version"}`,
+      lc: vA.lc || null,
+      chamber: vA.chamber || origin,
       date: vA.date,
       text: vA.text,
     };
-    const subChamber =
-      lcSubstituteChamber(lc?.current_lc) ||
-      (origin === "House" ? "Senate" : "House");
     const sideB = {
-      label: `${bill.bill_number} — ${vB.type || "Version"}`,
-      lc: lc?.current_lc || null,
-      chamber: subChamber,
+      label: `${bill.bill_number} — ${vB.lc || vB.type || "Version"}`,
+      lc: vB.lc || null,
+      chamber:
+        vB.chamber ||
+        lcSubstituteChamber(vB.lc) ||
+        (origin === "House" ? "Senate" : "House"),
       date: vB.date,
       text: vB.text,
     };

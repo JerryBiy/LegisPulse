@@ -1283,6 +1283,26 @@ export const api = {
     },
 
     /**
+     * Resolve the legis.ga.gov internal legislation id for a bill number.
+     * The background scraper stores this on every bill_lc_history row, so
+     * it's the bridge between a LegiScan bill and the legis.ga.gov version
+     * detail endpoint. Returns the numeric id or null.
+     */
+    async getLegislationId(billNumber) {
+      const bn = String(billNumber || "")
+        .replace(/\s+/g, "")
+        .toUpperCase();
+      if (!bn) return null;
+      const { data, error } = await supabase
+        .from("bill_lc_history")
+        .select("legislation_id")
+        .eq("bill_number", bn)
+        .maybeSingle();
+      if (error) throw error;
+      return data?.legislation_id ?? null;
+    },
+
+    /**
      * Update the GLOBAL bill_lc_history for the given entries.
      * Detects changes against whatever is currently in the global
      * table (NOT the user's per-user row), so the first user to
