@@ -1175,10 +1175,35 @@ export const api = {
     async getAll() {
       const userId = await getUserId();
 
-      const { data: histRows, error: histErr } = await supabase
-        .from("bill_lc_history")
-        .select("bill_number, current_lc, previous_lc, lc_changed_at");
-      if (histErr) throw histErr;
+      // `bill_lc_history` is now global (every bill in the session is
+      // tracked by the background job, ~5k+ rows). The UI only needs
+      // LC state for bills THIS user follows (personal + team), so we
+      // scope the read to that set — otherwise this poll would pull
+      // the entire table every minute.
+      const [{ data: profileRow }, teamNumbers] = await Promise.all([
+        supabase
+          .from("profiles")
+          .select("tracked_bill_ids")
+          .eq("id", userId)
+          .maybeSingle(),
+        api.entities.Team.getAllTeamBillNumbers().catch(() => []),
+      ]);
+      const relevant = [
+        ...new Set([
+          ...(profileRow?.tracked_bill_ids ?? []),
+          ...(teamNumbers ?? []),
+        ]),
+      ];
+
+      let histRows = [];
+      if (relevant.length > 0) {
+        const { data, error: histErr } = await supabase
+          .from("bill_lc_history")
+          .select("bill_number, current_lc, previous_lc, lc_changed_at")
+          .in("bill_number", relevant);
+        if (histErr) throw histErr;
+        histRows = data ?? [];
+      }
 
       const { data: ackRows, error: ackErr } = await supabase
         .from("bill_lc_tracking")

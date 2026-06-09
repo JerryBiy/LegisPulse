@@ -3,6 +3,7 @@ import { request as httpsRequest } from "node:https";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runLcRecheck, startLcRecheckScheduler } from "./server/lcRecheck.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const DIST = join(__dirname, "dist");
@@ -115,6 +116,37 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // Manual / external trigger for the LC-number background scan.
+  //   POST /api/lc-recheck            → run (default 90s budget), return summary
+  //   POST /api/lc-recheck?budget=0   → run unbounded (full backfill)
+  // Protected by the x-recheck-secret header when LC_RECHECK_SECRET is set.
+  if (pathname === "/api/lc-recheck") {
+    if (req.method !== "POST") {
+      res.writeHead(405, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Method Not Allowed" }));
+      return;
+    }
+    const expected = process.env.LC_RECHECK_SECRET;
+    if (expected && req.headers["x-recheck-secret"] !== expected) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+    const budgetParam = url.searchParams.get("budget");
+    const budgetMs = budgetParam != null ? Number(budgetParam) : 90_000;
+    runLcRecheck({ budgetMs: Number.isFinite(budgetMs) ? budgetMs : 90_000 })
+      .then((summary) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(summary));
+      })
+      .catch((err) => {
+        console.error("[lc-recheck] HTTP run failed:", err.message);
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      });
+    return;
+  }
+
   // Try exact path first
   const filePath = join(DIST, pathname);
   if (serveFile(filePath, res)) return;
@@ -129,4 +161,5 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Static server running on port ${PORT}`);
+  startLcRecheckScheduler();
 });
