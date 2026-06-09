@@ -59,6 +59,27 @@ export default function Dashboard() {
     queryFn: () => api.LcTracking.getAll(),
   });
 
+  // Session-wide LC lookup (every bill, not just tracked) so untracked
+  // dashboard cards can still show their LC number. Cached for a while
+  // since the background job only updates it hourly.
+  const { data: globalLcMap = {} } = useQuery({
+    queryKey: ["lcGlobalMap"],
+    queryFn: () => api.LcTracking.getGlobalLcMap(),
+    staleTime: 10 * 60 * 1000,
+  });
+
+  // Merge: prefer the rich tracked-bill entry (has change-notification
+  // state), otherwise fall back to a minimal entry from the global map.
+  const lcFor = useCallback(
+    (billNumber) => {
+      const tracked = lcTrackingMap[billNumber];
+      if (tracked) return tracked;
+      const lc = globalLcMap[billNumber];
+      return lc ? { current_lc: lc } : null;
+    },
+    [lcTrackingMap, globalLcMap],
+  );
+
   // Fetch bill numbers for every team in parallel
   const teamBillQueries = allTeams.map((t) => ({
     queryKey: ["teamBills", t.id],
@@ -527,7 +548,7 @@ export default function Dashboard() {
                         teams={allTeams}
                         teamBillMap={teamBillMap}
                         onToggleTeamBill={handleToggleTeamBill}
-                        lcTracking={lcTrackingMap[bill.bill_number] || null}
+                        lcTracking={lcFor(bill.bill_number)}
                       />
                     </motion.div>
                   ))}
@@ -572,9 +593,7 @@ export default function Dashboard() {
         teams={allTeams}
         teamBillMap={teamBillMap}
         onToggleTeamBill={handleToggleTeamBill}
-        lcTracking={
-          selectedBill ? lcTrackingMap[selectedBill.bill_number] || null : null
-        }
+        lcTracking={selectedBill ? lcFor(selectedBill.bill_number) : null}
       />
     </div>
   );

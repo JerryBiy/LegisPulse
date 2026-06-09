@@ -1255,6 +1255,34 @@ export const api = {
     },
 
     /**
+     * Lightweight, session-wide LC lookup for the dashboard.
+     * Returns a plain object keyed by bill_number → current_lc for
+     * EVERY bill in the global history table (the background job keeps
+     * this populated for all ~5k bills). Unlike getAll(), this is not
+     * scoped to the user's tracked bills, so untracked cards can still
+     * display their LC number. Only two columns are selected and the
+     * result is meant to be cached with a long staleTime.
+     */
+    async getGlobalLcMap() {
+      const PAGE_SIZE = 1000;
+      const map = {};
+      let from = 0;
+      while (true) {
+        const { data, error } = await supabase
+          .from("bill_lc_history")
+          .select("bill_number, current_lc")
+          .not("current_lc", "is", null)
+          .range(from, from + PAGE_SIZE - 1);
+        if (error) throw error;
+        if (!data || data.length === 0) break;
+        for (const r of data) map[r.bill_number] = r.current_lc;
+        if (data.length < PAGE_SIZE) break;
+        from += PAGE_SIZE;
+      }
+      return map;
+    },
+
+    /**
      * Update the GLOBAL bill_lc_history for the given entries.
      * Detects changes against whatever is currently in the global
      * table (NOT the user's per-user row), so the first user to

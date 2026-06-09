@@ -825,6 +825,122 @@ export async function fetchGABills(sessionId) {
   return bills;
 }
 
+// ─── Comparison helpers ──────────────────────────────────────
+// Lightweight, cached lookups used by the Comparison page so users
+// can search/select bills, pick versions and compare across years.
+
+/**
+ * List Georgia sessions (newest first) for the year picker.
+ * Returns [{ session_id, session_name, year_start, year_end }].
+ */
+let cachedGASessions = null;
+export async function getGASessions() {
+  if (cachedGASessions) return cachedGASessions;
+  const data = await legiscanRequest("getSessionList", { state: "GA" });
+  const sessions = (data.sessions || []).map((s) => ({
+    session_id: s.session_id,
+    session_name: s.session_name || s.name || `Session ${s.session_id}`,
+    year_start: s.year_start,
+    year_end: s.year_end,
+    special: s.special === 1,
+  }));
+  // Newest first.
+  sessions.sort((a, b) => (b.year_start || 0) - (a.year_start || 0));
+  cachedGASessions = sessions;
+  return sessions;
+}
+
+/**
+ * Lean master-list fetch (no party enrichment) for fast bill search.
+ * Cached per session for the lifetime of the page.
+ * Returns [{ legiscan_id, bill_number, title, last_action, status_date }].
+ */
+const cachedSessionBills = new Map();
+export async function fetchGABillsLite(sessionId) {
+  if (!sessionId) sessionId = await getGASessionId();
+  if (!sessionId) return [];
+  if (cachedSessionBills.has(sessionId))
+    return cachedSessionBills.get(sessionId);
+
+  const data = await legiscanRequest("getMasterList", {
+    state: "GA",
+    id: sessionId,
+  });
+  const masterList = data.masterlist || {};
+  const bills = [];
+  for (const [key, item] of Object.entries(masterList)) {
+    if (key === "session") continue;
+    const bill = item.bill || item;
+    const billNumber = bill.bill_number || bill.number;
+    if (!bill.bill_id || !billNumber) continue;
+    bills.push({
+      legiscan_id: bill.bill_id,
+      bill_number: String(billNumber).toUpperCase(),
+      title: bill.title || bill.description || "",
+      last_action: bill.last_action || "",
+      status_date: bill.status_date || bill.last_action_date || "",
+    });
+  }
+  bills.sort((a, b) => a.bill_number.localeCompare(b.bill_number));
+  cachedSessionBills.set(sessionId, bills);
+  return bills;
+}
+
+/**
+ * Search Georgia bills by bill number or title keyword within a session.
+ * @param {string} query free text (e.g. "HB 1020" or "education")
+ * @param {number} [sessionId] defaults to the current session
+ * @param {number} [limit=25]
+ */
+export async function searchGABills(query, sessionId = null, limit = 25) {
+  const q = String(query || "")
+    .trim()
+    .toLowerCase();
+  if (!q) return [];
+  const bills = await fetchGABillsLite(sessionId);
+  // Normalise the query for bill-number matching ("hb 1020" → "hb1020").
+  const compact = q.replace(/\s+/g, "");
+  const scored = [];
+  for (const b of bills) {
+    const num = b.bill_number.toLowerCase();
+    const title = b.title.toLowerCase();
+    let score = 0;
+    if (num === compact) score = 100;
+    else if (num.startsWith(compact)) score = 80;
+    else if (num.includes(compact)) score = 60;
+    if (title.includes(q)) score = Math.max(score, 40);
+    if (score > 0) scored.push({ ...b, _score: score });
+  }
+  scored.sort(
+    (a, b) => b._score - a._score || a.bill_number.localeCompare(b.bill_number),
+  );
+  return scored.slice(0, limit).map(({ _score, ...rest }) => rest);
+}
+
+/**
+ * Find a specific bill number within a session (for cross-year compare).
+ * Returns { legiscan_id, bill_number, title } or null.
+ */
+export async function findBillInSession(billNumber, sessionId) {
+  const target = String(billNumber || "")
+    .replace(/\s+/g, "")
+    .toUpperCase();
+  if (!target || !sessionId) return null;
+  const bills = await fetchGABillsLite(sessionId);
+  return bills.find((b) => b.bill_number === target) || null;
+}
+
+/**
+ * Fetch the newest usable bill text body (extracted) for a bill.
+ * Returns { date, type, text } or null.
+ */
+export async function fetchNewestBillText(legiscanBillId) {
+  const versions = await fetchBillTextVersionsForAI(legiscanBillId, 1);
+  if (!versions || versions.length === 0) return null;
+  const v = versions[0];
+  return { date: v.date, type: v.type, text: v.text };
+}
+
 /**
  * Fetch just the sponsor info for a bill (single getBill call, no text loop).
  * Returns { sponsors, primarySponsor, coSponsors, party } — empty when none.

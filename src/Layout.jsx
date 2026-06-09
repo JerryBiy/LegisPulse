@@ -15,6 +15,7 @@ import {
   Users,
   CalendarDays,
   Landmark,
+  GitCompare,
   Menu,
 } from "lucide-react";
 import {
@@ -63,6 +64,12 @@ const navigationItems = [
     url: createPageUrl("Committees"),
     icon: Landmark,
     description: "GA House & Senate Committees",
+  },
+  {
+    title: "Comparison",
+    url: createPageUrl("Comparison"),
+    icon: GitCompare,
+    description: "Compare Bill Versions & Substitutes",
   },
   {
     title: "Twitter Feed",

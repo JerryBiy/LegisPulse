@@ -1,6 +1,7 @@
 import BillForm from "./pages/BillForm";
 import Calendar from "./pages/Calendar";
 import Committees from "./pages/Committees";
+import Comparison from "./pages/Comparison";
 import Dashboard from "./pages/Dashboard";
 import EmailLists from "./pages/EmailLists";
 import Settings from "./pages/Settings";
@@ -13,6 +14,7 @@ export const PAGES = {
   BillForm: BillForm,
   Calendar: Calendar,
   Committees: Committees,
+  Comparison: Comparison,
   Dashboard: Dashboard,
   EmailLists: EmailLists,
   Settings: Settings,

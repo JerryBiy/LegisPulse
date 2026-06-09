@@ -36,43 +36,16 @@ import {
   Shield,
   AlertTriangle,
   StickyNote,
-  UserCheck,
   ArrowRight,
   RefreshCw,
-  GitCompare,
 } from "lucide-react";
 import { format } from "date-fns";
 import { api } from "@/api/apiClient";
-import {
-  fetchBillPDFLink,
-  fetchBillTextForAI,
-  fetchBillTextVersionsForAI,
-} from "@/services/legiscan";
+import { fetchBillPDFLink, fetchBillTextForAI } from "@/services/legiscan";
 
 const isLikelyPdfUrl = (url) => {
   if (!url) return false;
   return String(url).toLowerCase().includes(".pdf");
-};
-
-// ── LC substitute detection ─────────────────────────────────
-// LC numbers look like "LC 52 2837" (no substitute) or
-// "LC 52 2837S" / "LC 82 2837RCS" / "LC 112 2847HS" / "LC 12 3847SCS"
-// where the trailing letters indicate a substitute version + chamber.
-const LC_SUFFIX_REGEX = /^\s*LC\s+\d+\s+\d+\s*([A-Z]+)\s*$/i;
-const getLcSuffix = (lc) => {
-  const match = String(lc || "").match(LC_SUFFIX_REGEX);
-  return match ? match[1].toUpperCase() : "";
-};
-const hasSubstituteSuffix = (lc) => getLcSuffix(lc).length > 0;
-// Identify which chamber introduced the substitute based on the
-// suffix letters. Suffixes containing "H" indicate the House,
-// otherwise the presence of "S" indicates the Senate.
-const getSubstituteChamber = (lc) => {
-  const sfx = getLcSuffix(lc);
-  if (!sfx) return null;
-  if (sfx.includes("H")) return "House";
-  if (sfx.includes("S")) return "Senate";
-  return null;
 };
 
 const formatKeyLabel = (key) =>
@@ -188,9 +161,6 @@ export default function BillDetailsModal({
   const [pdfLink, setPdfLink] = useState(null);
   const [pdfStatus, setPdfStatus] = useState("idle");
   const [resolvedSponsors, setResolvedSponsors] = useState([]);
-  const [isGeneratingChanges, setIsGeneratingChanges] = useState(false);
-  const [whatChanged, setWhatChanged] = useState(null);
-  const [whatChangedError, setWhatChangedError] = useState("");
 
   useEffect(() => {
     if (!bill) {
@@ -208,8 +178,6 @@ export default function BillDetailsModal({
   useEffect(() => {
     setGeneratedSummary(null);
     setAiError("");
-    setWhatChanged(null);
-    setWhatChangedError("");
   }, [bill?.id, isOpen]);
 
   useEffect(() => {
@@ -307,28 +275,6 @@ export default function BillDetailsModal({
       document.title = "LegisPulse";
     }
   }, [bill, isOpen]);
-
-  // Hydrate cached version-change result from bill.extra on open.
-  useEffect(() => {
-    if (!bill || !isOpen) {
-      setWhatChanged(null);
-      return;
-    }
-    const lcTrack = (lcTracking && lcTracking[bill.bill_number]) || null;
-    const curLc = lcTrack?.current_lc || bill.lc_number || null;
-    const prevLc = lcTrack?.previous_lc || null;
-    const cached = bill?.extra?.version_change;
-    if (
-      cached &&
-      cached.current_lc === curLc &&
-      cached.previous_lc === prevLc
-    ) {
-      setWhatChanged(cached);
-    } else {
-      setWhatChanged(null);
-    }
-    setWhatChangedError("");
-  }, [bill, isOpen, lcTracking]);
 
   if (!bill) return null;
 
@@ -491,151 +437,6 @@ export default function BillDetailsModal({
       );
     }
     setIsGeneratingSummary(false);
-  };
-
-  // ── Version-change ("What Changed") support ────────────────
-  const lcTrack = (lcTracking && lcTracking[bill.bill_number]) || null;
-  const currentLc = lcTrack?.current_lc || bill.lc_number || null;
-  const previousLc = lcTrack?.previous_lc || null;
-  const hasTwoVersions =
-    !!previousLc && !!currentLc && previousLc !== currentLc;
-  const anyHasSub =
-    hasSubstituteSuffix(currentLc) || hasSubstituteSuffix(previousLc);
-  // Only show the "What Changed" button when this bill has at least two
-  // recorded LC versions AND at least one of them is a substitute (has
-  // the trailing letter suffix). Per the product spec, bills without
-  // multiple LC numbers featuring a substitute should not see the button.
-  const canShowWhatChanged = hasTwoVersions && anyHasSub;
-
-  const substituteChamber =
-    getSubstituteChamber(currentLc) || getSubstituteChamber(previousLc);
-  const originChamber = bill.chamber === "house" ? "House" : "Senate";
-
-  const generateWhatChanged = async () => {
-    if (isGeneratingChanges) return;
-    setIsGeneratingChanges(true);
-    setWhatChangedError("");
-    try {
-      if (!bill.legiscan_id) {
-        throw new Error(
-          "This bill has no LegiScan reference, so versions cannot be compared.",
-        );
-      }
-      if (!canShowWhatChanged) {
-        throw new Error(
-          "This bill does not have multiple LC versions with a substitute.",
-        );
-      }
-
-      const versions = await fetchBillTextVersionsForAI(bill.legiscan_id, 2);
-      if (!versions || versions.length < 2) {
-        throw new Error(
-          "Could not retrieve two distinct bill versions from LegiScan.",
-        );
-      }
-
-      const [newer, older] = versions;
-      const chamberLabel =
-        substituteChamber || (originChamber === "House" ? "Senate" : "House"); // best-guess: the *other* chamber typically introduces the substitute
-      const headerLabel = `${bill.bill_number} – ${chamberLabel} Substitute`;
-
-      const prompt = `You are analyzing changes between two versions of Georgia legislative bill ${bill.bill_number} titled "${bill.title}".
-
-PREVIOUS VERSION
-  LC number: ${previousLc || "unknown"}
-  Date: ${older.date || "unknown"}
-  Type: ${older.type || "unknown"}
-  Text:
-  ${older.text}
-
-NEW VERSION
-  LC number: ${currentLc || "unknown"}
-  Date: ${newer.date || "unknown"}
-  Type: ${newer.type || "unknown"}
-  Text:
-  ${newer.text}
-
-Originating chamber of the bill: ${originChamber}.
-The new substitute (LC ${currentLc}) appears to have been introduced in: ${chamberLabel}.
-
-Return ONLY valid JSON with these fields:
-{
-  "chamber": "House" | "Senate",
-  "added": ["bullet describing something added in the new version", ...],
-  "removed": ["bullet describing something removed from the previous version", ...],
-  "modified": ["bullet describing a substantive modification", ...],
-  "summary": "short paragraph (3-5 sentences) summarizing what changed and the practical effect"
-}
-
-Requirements:
-- "chamber" must be "House" or "Senate" — the chamber that introduced the new substitute.
-- Each bullet must be one concise sentence in plain, neutral legislative language.
-- Do not include policy arguments or opinions.
-- If a category has no changes, return an empty array for it.
-- Focus on substantive legal changes (definitions, eligibility, penalties, funding, deadlines, agency duties), not formatting or renumbering.
-- Be accurate; if the two texts appear identical, say so in "summary" and return empty arrays.`;
-
-      const response = await api.integrations.Core.InvokeLLM({
-        prompt,
-        response_json_schema: {
-          type: "object",
-          properties: {
-            chamber: { type: "string" },
-            added: { type: "array", items: { type: "string" } },
-            removed: { type: "array", items: { type: "string" } },
-            modified: { type: "array", items: { type: "string" } },
-            summary: { type: "string" },
-          },
-          required: ["chamber", "added", "removed", "modified", "summary"],
-        },
-      });
-
-      const safeArr = (v) =>
-        Array.isArray(v)
-          ? v.filter((x) => typeof x === "string" && x.trim())
-          : [];
-      const result = {
-        header: headerLabel,
-        chamber:
-          typeof response?.chamber === "string" && response.chamber.trim()
-            ? response.chamber.trim()
-            : chamberLabel,
-        added: safeArr(response?.added),
-        removed: safeArr(response?.removed),
-        modified: safeArr(response?.modified),
-        summary:
-          (typeof response?.summary === "string" && response.summary.trim()) ||
-          "",
-        previous_lc: previousLc,
-        current_lc: currentLc,
-        generated_at: new Date().toISOString(),
-      };
-
-      setWhatChanged(result);
-
-      // Persist on bill.extra (merged) so other users / re-opens see cached result.
-      if (bill?.id) {
-        try {
-          const mergedExtra = {
-            ...(bill.extra || {}),
-            version_change: result,
-          };
-          const updatedBill = await api.entities.Bill.update(bill.id, {
-            extra: mergedExtra,
-          });
-          if (onBillUpdate && updatedBill) onBillUpdate(updatedBill);
-        } catch (e) {
-          console.warn("Failed to persist version-change summary", e);
-        }
-      }
-    } catch (error) {
-      console.error("Error generating version-change summary:", error);
-      setWhatChangedError(
-        error?.message ||
-          "Failed to compare versions. Check your AI API key and try again.",
-      );
-    }
-    setIsGeneratingChanges(false);
   };
 
   return (
@@ -1060,29 +861,6 @@ Requirements:
                   AI Analysis
                 </CardTitle>
                 <div className="flex items-center gap-2">
-                  {canShowWhatChanged && (
-                    <Button
-                      onClick={generateWhatChanged}
-                      disabled={isGeneratingChanges}
-                      variant="outline"
-                      className="border-amber-300 text-amber-700 hover:bg-amber-50"
-                      title={`Compare ${previousLc} → ${currentLc}`}
-                    >
-                      {isGeneratingChanges ? (
-                        <>
-                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-amber-600 mr-2" />
-                          Comparing...
-                        </>
-                      ) : (
-                        <>
-                          <GitCompare className="w-4 h-4 mr-2" />
-                          {whatChanged
-                            ? "Regenerate What Changed"
-                            : "What Changed"}
-                        </>
-                      )}
-                    </Button>
-                  )}
                   <Button
                     onClick={generateAISummary}
                     disabled={isGeneratingSummary}
@@ -1152,95 +930,6 @@ Requirements:
                   No AI analysis available. Click "Generate Summary" to create
                   one.
                 </p>
-              )}
-
-              {/* What Changed (version diff) */}
-              {(whatChangedError || whatChanged) && (
-                <div className="mt-6 border-t pt-4">
-                  {whatChangedError && (
-                    <p className="text-sm text-red-600 mb-3">
-                      {whatChangedError}
-                    </p>
-                  )}
-                  {whatChanged && (
-                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
-                      <div className="flex items-center justify-between gap-2 mb-3">
-                        <h4 className="font-semibold text-amber-900 flex items-center gap-2">
-                          <GitCompare className="w-4 h-4" />
-                          {whatChanged.header ||
-                            `${bill.bill_number} – ${whatChanged.chamber || "?"} Substitute`}
-                        </h4>
-                        <span className="text-xs text-amber-700">
-                          {whatChanged.previous_lc} → {whatChanged.current_lc}
-                        </span>
-                      </div>
-                      <p className="text-xs text-amber-800 mb-3">
-                        New substitute introduced in the{" "}
-                        <strong>{whatChanged.chamber}</strong>.
-                      </p>
-
-                      {whatChanged.added?.length > 0 && (
-                        <div className="mb-3">
-                          <h5 className="text-sm font-semibold text-green-800 mb-1">
-                            Added
-                          </h5>
-                          <ul className="list-disc pl-5 text-sm text-slate-800 space-y-1">
-                            {whatChanged.added.map((item, i) => (
-                              <li key={`add-${i}`}>{item}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-
-                      {whatChanged.removed?.length > 0 && (
-                        <div className="mb-3">
-                          <h5 className="text-sm font-semibold text-red-800 mb-1">
-                            Removed
-                          </h5>
-                          <ul className="list-disc pl-5 text-sm text-slate-800 space-y-1">
-                            {whatChanged.removed.map((item, i) => (
-                              <li key={`rem-${i}`}>{item}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-
-                      {whatChanged.modified?.length > 0 && (
-                        <div className="mb-3">
-                          <h5 className="text-sm font-semibold text-blue-800 mb-1">
-                            Modified
-                          </h5>
-                          <ul className="list-disc pl-5 text-sm text-slate-800 space-y-1">
-                            {whatChanged.modified.map((item, i) => (
-                              <li key={`mod-${i}`}>{item}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-
-                      {whatChanged.summary && (
-                        <div className="mt-3 p-3 bg-white/70 rounded border border-amber-200">
-                          <h5 className="text-sm font-semibold text-amber-900 mb-1">
-                            Summary
-                          </h5>
-                          <p className="text-sm text-slate-800 whitespace-pre-line">
-                            {whatChanged.summary}
-                          </p>
-                        </div>
-                      )}
-
-                      {whatChanged.generated_at && (
-                        <p className="text-[11px] text-amber-700 mt-3">
-                          Generated{" "}
-                          {format(
-                            new Date(whatChanged.generated_at),
-                            "MMM d, yyyy h:mm a",
-                          )}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
               )}
             </CardContent>
           </Card>
