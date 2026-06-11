@@ -469,7 +469,7 @@ export default function Comparison() {
 
       {configured && (
         <Tabs defaultValue="versions" className="w-full">
-          <TabsList className="grid w-full grid-cols-2 sm:grid-cols-4">
+          <TabsList className="grid h-auto w-full grid-cols-2 gap-1 sm:h-9 sm:grid-cols-4">
             <TabsTrigger value="versions">Versions</TabsTrigger>
             <TabsTrigger value="two-bills">Two Bills</TabsTrigger>
             <TabsTrigger value="across-years">Across Years</TabsTrigger>
