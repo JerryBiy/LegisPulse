@@ -8,6 +8,12 @@ LegisPulse tracks Georgia legislative bills and provides AI-generated bill analy
 - **Per-user data** — tracked bills, email lists, and notifications are stored in a cloud database, tied to your account
 - **Team collaboration** — create a team, invite colleagues by email, share bills across the team
 - **Team chat** — real-time messaging between team members with emoji, file/image attachments, drag-and-drop upload, and auto-expiry after 2½ weeks
+- **LC number tracking (all bills)** — a background scraper keeps the LC (Legislative Counsel) number for every bill in the session up to date from legis.ga.gov, with change notifications
+- **Comparison tab** — compare two bill versions/substitutes side-by-side with an AI-generated summary of additions, removals, and modifications, plus authoritative per-version LC numbers and chamber labels
+- **Calendar** — Georgia committee meeting schedule pulled from legis.ga.gov
+- **Committees** — browse committees, members, and assigned bills
+- **Twitter/X feed** — embedded legislative news feed
+- **Account profile & settings** — display name, username, and avatar upload
 - Sync Georgia bills from LegiScan (full session, 4000+ bills via paginated fetch)
 - Auto-sync on first load when no bills are in the database
 - Show newest bills first (higher bill number first)
@@ -76,16 +82,77 @@ Attachments are uploaded to a Supabase Storage bucket named `team-chat-files`. S
 
 ### Migrations
 
-| File                         | Purpose                                                                       |
-| ---------------------------- | ----------------------------------------------------------------------------- |
-| `003_team_chat.sql`          | Base `team_chat_messages` table, RLS, Realtime, cleanup function, pg_cron job |
-| `004_chat_rls_fix.sql`       | `get_my_team_ids()` helper, recreated RLS policies                            |
-| `005_chat_messages_rpc.sql`  | `get_team_chat_messages` RPC                                                  |
-| `006_chat_send_rpc.sql`      | `send_team_chat_message` RPC                                                  |
-| `007_chat_all_functions.sql` | Comprehensive file with all 5 chat functions                                  |
-| `008_chat_attachments.sql`   | Attachment columns, storage bucket, updated RPCs                              |
+| File                            | Purpose                                                                       |
+| ------------------------------- | ----------------------------------------------------------------------------- |
+| `003_team_chat.sql`             | Base `team_chat_messages` table, RLS, Realtime, cleanup function, pg_cron job |
+| `004_chat_rls_fix.sql`          | `get_my_team_ids()` helper, recreated RLS policies                            |
+| `005_chat_messages_rpc.sql`     | `get_team_chat_messages` RPC                                                  |
+| `006_chat_send_rpc.sql`         | `send_team_chat_message` RPC                                                  |
+| `007_chat_all_functions.sql`    | Comprehensive file with all 5 chat functions                                  |
+| `008_chat_attachments.sql`      | Attachment columns, storage bucket, updated RPCs                              |
+| `009`–`015`                     | Team invites/switching, team codes, bill metadata, multi-team, join approval  |
+| `016_calendar_events.sql`       | Calendar events table                                                         |
+| `017_lc_number_tracking.sql`    | Per-user `bill_lc_tracking` table + `bills.lc_number` column                  |
+| `018_lc_tracking_seen_at.sql`   | Change-acknowledgement (`change_seen` / `change_seen_at`) columns             |
+| `019`–`021`                     | Account/profile settings, profile avatar storage, chat avatar support         |
+| `022_shared_team_bills_rpc.sql` | RPC for shared team bill data                                                 |
+| `023_ga_meetings_cache.sql`     | Cache table for legis.ga.gov committee meetings                               |
+| `024_bill_lc_history.sql`       | Global, one-row-per-bill `bill_lc_history` table (LC source of truth)         |
+| `026_lc_history_all_bills.sql`  | Adds `legislation_id` to `bill_lc_history` for all-bills tracking             |
 
 Run each migration in the Supabase **SQL Editor** in order.
+
+## LC Number Tracking (all bills)
+
+Every bill on legis.ga.gov carries an internal **LC (Legislative Counsel) number** for each drafted version/substitute (e.g. `LC 33 9902S/RCS`). LegisPulse keeps the current LC number for **all ~5,480 bills** in the session continuously up to date so cards and the Comparison tab can display and diff them.
+
+### How it works
+
+- The scraper lives in [`server/lcRecheck.js`](server/lcRecheck.js) and runs **server-side on the Node host** (`npm start` → `server.js`). It must run from a US cloud host (e.g. Render) because legis.ga.gov firewalls Supabase edge IPs and most non-US egress.
+- It enumerates every bill via `POST /api/Legislation/Search`, then reads `GET /api/legislation/Detail/{id}` and extracts the newest LC number from the `versions[]` list.
+- Results are written to the global `bill_lc_history` table (one row per bill, with `legislation_id` bridging back to legis.ga.gov). Changed LC numbers are mirrored into the per-user `bills.lc_number` column.
+- Work is **incremental** — a bill is only re-fetched when it is new or its status date advanced — so steady-state runs are fast.
+
+### Endpoint & scheduler (`server.js`)
+
+| Route                            | Behavior                                                          |
+| -------------------------------- | ----------------------------------------------------------------- |
+| `POST /api/lc-recheck`           | Run a recheck (default `90000` ms budget), returns a JSON summary |
+| `POST /api/lc-recheck?budget=0`  | Run unbounded (full backfill of every bill)                       |
+| `POST /api/lc-recheck?budget=ms` | Run with a custom wall-clock budget in milliseconds               |
+
+- Protected by an `x-recheck-secret` request header when `LC_RECHECK_SECRET` is set.
+- A scheduler (`startLcRecheckScheduler`) runs an unbounded pass ~20 s after boot and then every `LC_RECHECK_INTERVAL_MS` (default 1 hour). Concurrent runs are serialised — a second call returns `{ skipped: true, reason: "already running" }`.
+- Also proxies `POST /api/openstates-graphql` → `https://openstates.org/graphql`.
+
+### `LcTracking` API (`src/api/apiClient.js`)
+
+| Method                                  | Purpose                                                                                 |
+| --------------------------------------- | --------------------------------------------------------------------------------------- |
+| `getAll()`                              | Merged LC map for the user's tracked + team bills (includes change-notification state)  |
+| `getGlobalLcMap()`                      | Lightweight `{ bill_number → current_lc }` for **every** bill (used by the dashboard)   |
+| `getLegislationId(billNumber)`          | Resolve the legis.ga.gov `legislation_id` for a bill (bridge to the version detail API) |
+| `getUnseenCount()`                      | Count of unseen LC changes for the current user                                         |
+| `markAllSeen()` / `markBillsSeen(nums)` | Acknowledge LC change notifications                                                     |
+| `batchUpsert(entries)`                  | Write LC numbers to the global history + bump the user's `last_checked`                 |
+
+## Comparison Tab
+
+The **Comparison** page (`src/pages/Comparison.jsx`) compares bill versions and substitutes with an AI-generated summary. It has four modes: **Versions** (two versions of one bill), **Two Bills**, **Across Years**, and **By Topic**.
+
+### Hybrid data sourcing
+
+The authoritative version list (with exact LC numbers and chamber labels) comes from **legis.ga.gov**, while the actual bill **text** fed to the AI comes from **LegiScan** (which exposes clean full text). The two are matched by recency so each version shows its own LC number while the diff runs on reliable text.
+
+- `src/services/legisGa.js` → `fetchBillVersionsGa(legislationId)` returns LC-bearing versions oldest-first as `{ versionNumber, name, lc, chamber, isCurrent }` (floor amendments without an LC are filtered out).
+- `src/services/legiscan.js` comparison helpers:
+  - `getGASessions()` — cached session list (newest first) for the year picker
+  - `fetchGABillsLite(sessionId)` — lean master list for fast search (cached per session)
+  - `searchGABills(query, sessionId, limit)` — scored search by bill number/title
+  - `findBillInSession(billNumber, sessionId)` — cross-year bill lookup
+  - `fetchBillTextVersionsForAI(id, count, maxLen)` — extracted text for the N newest versions
+  - `fetchNewestBillText(id)` — newest usable text body for a bill
+- The AI summary is produced by `api.integrations.Core.InvokeLLM` and returns `{ chamber, chamber_note, added[], removed[], modified[], summary }`.
 
 ## Tech Stack
 
@@ -94,7 +161,10 @@ Run each migration in the Supabase **SQL Editor** in order.
 - **Supabase** — PostgreSQL database + Row Level Security + Auth + Realtime + Storage
 - **@tanstack/react-query** — client-side data caching (5-minute stale time, shared cache keys)
 - **@emoji-mart/react** — emoji picker for team chat
-- `src/api/apiClient.js` — unified data layer over Supabase
+- **Node HTTP server** (`server.js`) — serves the static build, proxies OpenStates GraphQL, and hosts the LC-recheck scraper/scheduler (`server/lcRecheck.js`)
+- **LegiScan API** — bill master lists, sponsors, and version text
+- **legis.ga.gov API** — authoritative LC numbers, versions, committees, and meeting calendar
+- `src/api/apiClient.js` — unified data layer over Supabase + OpenAI
 
 ## Environment Variables
 
@@ -110,6 +180,19 @@ VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
 VITE_OPENAI_MODEL=gpt-4o-mini
 VITE_OPENAI_BASE_URL=https://api.openai.com/v1
 ```
+
+### Server-side variables (LC scraper)
+
+These are **not** `VITE_*` and are only read by the Node host (`server.js` / `server/lcRecheck.js`). Set them on the deployment that runs `npm start` (e.g. Render):
+
+```env
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+LC_RECHECK_SECRET=a_long_random_string          # gates POST /api/lc-recheck
+LC_RECHECK_INTERVAL_MS=3600000                  # optional, default 1 hour
+```
+
+The scraper is disabled automatically when `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` are absent.
 
 Get your Supabase URL and anon key from **Project Settings → API** in the [Supabase dashboard](https://supabase.com/dashboard).
 
@@ -204,16 +287,19 @@ npm run dev
 Other scripts:
 
 ```bash
-npm run build
+npm run build      # produce the static dist/ bundle
+npm start          # run the Node server (serves dist/, API proxy, LC scraper)
 npm run preview
 npm run lint
 npm run lint:fix
 npm run typecheck
 ```
 
+> `npm run dev` (Vite) does **not** run the LC scraper or API proxy. Use `npm run build && npm start` to exercise the Node server locally, though the scraper itself cannot reach legis.ga.gov from most non-US networks.
+
 ## Deploying
 
-This is a static Vite build — deploy to **Vercel**, **Netlify**, or **Render**.
+The Vite static build can deploy to **Vercel** or **Netlify**. However, the **LC-number scraper requires a Node host** that runs `npm start` (`server.js`) — deploy to **Render** (or a similar US-based Node host) so the scheduler and `POST /api/lc-recheck` endpoint can reach legis.ga.gov.
 
 Add these environment variables in your hosting dashboard:
 
@@ -223,6 +309,8 @@ Add these environment variables in your hosting dashboard:
 - `VITE_SUPABASE_ANON_KEY`
 - optional `VITE_OPENAI_MODEL`
 - optional `VITE_OPENAI_BASE_URL`
+
+For the LC scraper (Node host only): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `LC_RECHECK_SECRET`, optional `LC_RECHECK_INTERVAL_MS`.
 
 ## Security Warning (Important)
 
@@ -235,24 +323,33 @@ src/
   pages/
     Dashboard.jsx        – main bill list, search, filter, track toggle, add to team
     TrackedBills.jsx     – bills the user is tracking
+    Comparison.jsx       – compare bill versions/substitutes with AI summary (4 modes)
     Team.jsx             – team management: members, invite, shared bills, leave team
+    Calendar.jsx         – Georgia committee meeting calendar
+    Committees.jsx       – committees, members, and assigned bills
+    TwitterFeed.jsx      – embedded legislative news feed
     Login.jsx            – login form
     Register.jsx         – registration form
-    Settings.jsx         – user settings
+    Settings.jsx         – user settings (profile, username, avatar)
     EmailLists.jsx       – email list management
   components/
     TeamChat.jsx         – real-time team chat with emoji, file upload, drag-drop
     bills/
-      BillCard.jsx       – bill card with track + add-to-team buttons
+      BillCard.jsx       – bill card with track + add-to-team buttons + LC number
       BillDetailsModal   – bill details + AI analysis + track/team actions
       BillSyncButton     – LegiScan sync action (auto-syncs when DB is empty)
       BillFilters        – filter UI
   services/
-    legiscan.js          – LegiScan API fetch/parsing helpers
+    legiscan.js          – LegiScan API fetch/parsing + Comparison helpers
+    legisGa.js           – legis.ga.gov API (LC versions, committees, meetings)
+    openstates.js        – OpenStates GraphQL helpers (via server proxy)
   api/
-    apiClient.js         – all data ops (Supabase CRUD + RPC calls + OpenAI)
+    apiClient.js         – all data ops (Supabase CRUD + RPC calls + OpenAI + LcTracking)
   lib/
     supabase.js          – Supabase client instance
     AuthContext.jsx      – global auth state (session, login, register, logout)
     query-client.js      – React Query client (5-min stale time)
+server.js               – Node HTTP server: static hosting + API proxy + LC-recheck route
+server/
+  lcRecheck.js          – all-bills LC scraper + hourly scheduler
 ```
