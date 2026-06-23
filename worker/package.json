@@ -1,0 +1,17 @@
+{
+  "name": "legistrack-meeting-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Always-on worker that streams YouTube live meeting audio to the transcribe-meeting Edge Function.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node monitor.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "ws": "^8.21.0"
+  }
+}

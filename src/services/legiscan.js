@@ -330,7 +330,7 @@ const extractTextFromPdfBytes = async (pdfData) => {
 // Maximum bytes to download for a remote PDF (10 MB).
 const MAX_PDF_DOWNLOAD_BYTES = 10 * 1024 * 1024;
 
-const extractTextFromPdfUrl = async (pdfUrl) => {
+export const extractTextFromPdfUrl = async (pdfUrl) => {
   if (!pdfUrl) return "";
 
   let controller;

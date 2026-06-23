@@ -16,6 +16,7 @@ import {
   CalendarDays,
   Landmark,
   GitCompare,
+  Radio,
   Menu,
 } from "lucide-react";
 import {
@@ -58,6 +59,12 @@ const navigationItems = [
     url: createPageUrl("Calendar"),
     icon: CalendarDays,
     description: "Events & Schedule",
+  },
+  {
+    title: "Meeting Intelligence",
+    url: createPageUrl("MeetingIntelligence"),
+    icon: Radio,
+    description: "Live Transcripts & Meeting Alerts",
   },
   {
     title: "Committees",
@@ -184,6 +191,15 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
     );
   }, [teamNotifications, lcUnseenTeamCount]);
 
+  // ── Meeting Intelligence unseen-alert badge ────────────────────────────────
+  const { data: meetingAlertCount = 0 } = useQuery({
+    queryKey: ["miAlertCount"],
+    queryFn: () => api.meetingIntel.alerts.getUnseenCount(),
+    enabled: !!user,
+    refetchInterval: 30000,
+    staleTime: 10000,
+  });
+
   return (
     <div className="h-screen flex w-full bg-slate-50 overflow-hidden">
       <Sidebar className="border-r border-slate-200 bg-white">
@@ -240,6 +256,12 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
                               {lcUnseenPersonalCount > 99
                                 ? "99+"
                                 : lcUnseenPersonalCount}
+                            </span>
+                          )}
+                        {item.title === "Meeting Intelligence" &&
+                          meetingAlertCount > 0 && (
+                            <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center bg-red-500 text-white text-[11px] font-bold rounded-full leading-none">
+                              {meetingAlertCount > 99 ? "99+" : meetingAlertCount}
                             </span>
                           )}
                       </Link>
