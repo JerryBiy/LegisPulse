@@ -3,7 +3,7 @@ import { defineConfig } from "vite";
 
 // https://vite.dev/config/
 export default defineConfig({
-  logLevel: "error", // Suppress warnings, only show errors
+  logLevel: "info", // Suppress warnings, only show errors
   plugins: [react()],
   server: {
     host: "0.0.0.0",

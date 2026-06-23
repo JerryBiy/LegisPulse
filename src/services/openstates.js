@@ -88,7 +88,7 @@ async function get(path, params = {}, retries = 2) {
  * @param {string} [endDate]   ISO string
  * @returns {Promise<Array>} normalised events
  */
-export async function fetchGAEvents(startDate, endDate) {
+export async function fetchGAEvents(startDate, endDate, maxPages = 5) {
   if (!API_KEY) return [];
 
   const allEvents = [];
@@ -124,8 +124,8 @@ export async function fetchGAEvents(startDate, endDate) {
     if (data.results.length < perPage) break;
     page++;
 
-    // Safety: cap at 5 pages (100 events per range) to avoid rate limits
-    if (page > 5) break;
+    // Safety cap — caller can raise this for historical backfills
+    if (page > maxPages) break;
   }
 
   return allEvents.map(normalizeEvent);

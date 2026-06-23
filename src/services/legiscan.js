@@ -550,6 +550,24 @@ export async function fetchBillTextForAI(legiscanBillId) {
 }
 
 /**
+ * Parse a committee name from a LegiScan action string.
+ * Handles patterns like "Assigned to Finance Committee" or
+ * "Referred to Health & Human Services Committee".
+ * Exported so Committees.jsx can use it when scanning bill history.
+ */
+export function extractCommitteeFromLastAction(lastAction) {
+  if (!lastAction) return null;
+  const match = lastAction.match(
+    /(?:assigned to|referred to|re-referred to|recommitted to)\s+(.+?)(?:\s*[.,;]|$)/i,
+  );
+  if (!match) return null;
+  const name = match[1].trim();
+  const lower = name.toLowerCase();
+  if (lower === "senate" || lower === "house" || lower === "governor") return null;
+  return name || null;
+}
+
+/**
  * Fetch text for the most recent N bill versions (for AI version-diff).
  * Returns an array sorted newest-first:
  *   [{ doc_id, date, type, type_id, text }]
@@ -692,6 +710,7 @@ export async function fetchGABills(sessionId) {
 
     bills.push({
       legiscan_id: bill.bill_id,
+      change_hash: bill.change_hash || null,
       bill_number: billNumber,
       title: bill.title || bill.description,
       chamber: bill.chamber || bill.body || determineChamber(billNumber),
@@ -715,9 +734,64 @@ export async function fetchGABills(sessionId) {
       status: mapLegiScanStatus(statusCode, statusDesc),
       last_action: bill.last_action || statusDesc,
       last_action_date: bill.last_action_date || bill.status_date,
+      // Temporary: carry pending_committee_id so we can batch-resolve names below
+      _pendingCommitteeId: bill.pending_committee_id || null,
+      current_committee:
+        bill.committee?.name ||
+        (typeof bill.committee === "string" ? bill.committee : null) ||
+        extractCommitteeFromLastAction(bill.last_action || statusDesc),
       url: bill.state_link || bill.url,
     });
   }
+
+  // ── Committee name enrichment via pending_committee_id ────────────────────
+  // getMasterList returns pending_committee_id (an integer) but not the name.
+  // Collect unique IDs, fetch names in parallel, then apply them to bills.
+  try {
+    const uniqueCommitteeIds = [
+      ...new Set(
+        bills
+          .map((b) => b._pendingCommitteeId)
+          .filter((id) => id && id !== 0),
+      ),
+    ];
+
+    if (uniqueCommitteeIds.length > 0) {
+      console.log(
+        `[LegiScan] Resolving ${uniqueCommitteeIds.length} committee names…`,
+      );
+      const committeeNameMap = {};
+      await Promise.allSettled(
+        uniqueCommitteeIds.map(async (id) => {
+          try {
+            const res = await legiscanRequest("getCommittee", { id });
+            const name =
+              res.committee?.committee_name || res.committee?.name || null;
+            if (name) committeeNameMap[id] = name;
+          } catch (err) {
+            console.warn(`[LegiScan] getCommittee(${id}) failed:`, err);
+          }
+        }),
+      );
+
+      for (const b of bills) {
+        if (b._pendingCommitteeId && committeeNameMap[b._pendingCommitteeId]) {
+          b.current_committee = committeeNameMap[b._pendingCommitteeId];
+        }
+      }
+
+      console.log(
+        `[LegiScan] Committee names resolved for ${
+          bills.filter((b) => b.current_committee).length
+        } bills`,
+      );
+    }
+  } catch (err) {
+    console.warn("[LegiScan] Committee enrichment failed:", err);
+  }
+
+  // Clean up temporary field
+  for (const b of bills) delete b._pendingCommitteeId;
 
   // ── Party enrichment: one getSessionPeople call instead of one getBill per bill ──
   // getSessionPeople returns all legislators for the session with their party data.
@@ -958,6 +1032,61 @@ export async function fetchBillSponsors(legiscanBillId) {
     coSponsors: sponsors.slice(1),
     party: extractPrimaryParty(rawSponsors),
   };
+}
+
+/**
+ * Enrich a list of bills with committee + history data via individual getBill calls.
+ *
+ * getMasterList does not include committee names or bill history — only the individual
+ * getBill endpoint has both `bill.committee.name` (current assignment) and `bill.history`
+ * (every past action, which is the only way to know which committee a bill passed through
+ * after it has left committee).
+ *
+ * Runs CONCURRENCY requests in parallel. Calls onProgress(completed, total) after each
+ * batch so the caller can show a progress bar. Returns only successful results; failures
+ * are logged and skipped so a partial failure never aborts the whole sync.
+ *
+ * @param {Array<{legiscan_id: number|string, bill_number: string}>} bills
+ * @param {function(number, number): void} [onProgress]
+ * @returns {Promise<Array<{legiscan_id, bill_number, current_committee, history}>>}
+ */
+export async function enrichBillsWithDetails(bills, onProgress) {
+  const CONCURRENCY = 6;
+  const candidates = bills.filter((b) => b.legiscan_id);
+  const results = [];
+  let completed = 0;
+
+  for (let i = 0; i < candidates.length; i += CONCURRENCY) {
+    const chunk = candidates.slice(i, i + CONCURRENCY);
+    const settled = await Promise.allSettled(
+      chunk.map(async (bill) => {
+        const data = await legiscanRequest("getBill", { id: bill.legiscan_id });
+        const b = data.bill || {};
+        return {
+          legiscan_id: bill.legiscan_id,
+          bill_number: bill.bill_number,
+          current_committee: b.committee?.name || null,
+          history: Array.isArray(b.history) ? b.history : [],
+        };
+      }),
+    );
+
+    for (const r of settled) {
+      completed++;
+      if (r.status === "fulfilled") {
+        results.push(r.value);
+      } else {
+        console.warn(
+          "[LegiScan] getBill enrichment failed:",
+          r.reason?.message || r.reason,
+        );
+      }
+    }
+
+    if (onProgress) onProgress(completed, candidates.length);
+  }
+
+  return results;
 }
 
 /**

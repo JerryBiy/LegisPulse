@@ -246,7 +246,7 @@ export default function CalendarPage() {
   const { data: userEvents = [], isLoading: isLoadingUser } = useQuery({
     queryKey: ["calendarEvents", queryRange.start, queryRange.end],
     queryFn: () => api.calendarEvents.list(queryRange.start, queryRange.end),
-    placeholderData: (prev) => prev, // keep previous data while refetching
+    placeholderData: (prev) => prev,
   });
 
   // ── Fetch GA legislative events from Supabase cache ───────────
@@ -455,7 +455,7 @@ export default function CalendarPage() {
     normalizeBillId,
   ]);
 
-  // ── Merge events ────────────────────────────────────────────
+  // ── Merge all events for display ───────────────────────────
   const events = useMemo(() => {
     const merged = [...userEvents];
     if (showLegislative) {
@@ -484,7 +484,6 @@ export default function CalendarPage() {
       }
       merged.push(...filtered);
     }
-    // Sort by start_time
     return merged.sort(
       (a, b) =>
         new Date(a.start_time).getTime() - new Date(b.start_time).getTime(),

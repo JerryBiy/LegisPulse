@@ -9,46 +9,53 @@ import {
   AlertCircle,
   WrenchIcon,
   FileSearch,
+  Landmark,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   fetchGABills,
   isLegiScanConfigured,
   fetchLCNumbersForBills,
+  enrichBillsWithDetails,
 } from "@/services/legiscan";
 
 function isMaintenance(msg) {
   return typeof msg === "string" && msg.toLowerCase().includes("maintenance");
 }
 
+// Which phase of syncing are we in
+// null | "bills" | "committees" | "lc"
+function PhaseLabel({ phase }) {
+  if (phase === "bills") return "Fetching bill list from LegiScan…";
+  if (phase === "committees") return "Loading committee & history data…";
+  if (phase === "lc") return "Fetching LC numbers for tracked bills…";
+  return "Working…";
+}
+
 export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState(null);
-  const [lcProgress, setLcProgress] = useState(null); // { current, total }
-  const [progress, setProgress] = useState({
-    current: 0,
-    total: 0,
-    newBills: 0,
-  });
+  const [phase, setPhase] = useState(null); // "bills" | "committees" | "lc"
+  const [phaseProgress, setPhaseProgress] = useState({ current: 0, total: 0 });
   const autoSyncFired = useRef(false);
 
   const syncBillsFromWebsite = async () => {
     setIsSyncing(true);
     setSyncStatus(null);
-    setLcProgress(null);
-    setProgress({ current: 0, total: 0, newBills: 0 });
+    setPhase(null);
+    setPhaseProgress({ current: 0, total: 0 });
 
     try {
-      // Check if LegiScan is configured
       if (!isLegiScanConfigured()) {
         throw new Error(
           "LegiScan API key not configured. Add VITE_LEGISCAN_API_KEY to your .env file.",
         );
       }
 
-      // Fetch bills from LegiScan API and replace store completely to ensure URLs are present
+      // ── Phase 1: fetch master list ───────────────────────────────────────
+      setPhase("bills");
       const bills = await fetchGABills();
-      setProgress((prev) => ({ ...prev, total: bills.length }));
+      setPhaseProgress({ current: bills.length, total: bills.length });
 
       await api.entities.Bill.clearAll();
       await api.entities.Bill.replaceAll(
@@ -66,26 +73,52 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
           status: bill.status,
           last_action: bill.last_action,
           last_action_date: bill.last_action_date,
+          current_committee: bill.current_committee || null,
           url: bill.url,
           pdf_url: null,
           is_tracked: false,
           tags: [],
+          // store change_hash so future syncs can skip unchanged bills
+          extra: bill.change_hash ? { change_hash: bill.change_hash } : null,
         })),
       );
 
-      // ── LC Number Enrichment for tracked bills ──────────────────────────
+      // ── Phase 2: enrich every bill with committee name + full history ────
+      // getMasterList only has pending_committee_id (an integer). The only
+      // reliable source for committee.name and the complete history array is
+      // the individual getBill endpoint. Without history, the Committees page
+      // has no data for bills that have already left committee.
+      setPhase("committees");
+      setPhaseProgress({ current: 0, total: bills.length });
+
       try {
-        // Get personal tracked bill IDs
+        const billsWithIds = bills.filter((b) => b.legiscan_id);
+        const enriched = await enrichBillsWithDetails(
+          billsWithIds,
+          (current, total) => setPhaseProgress({ current, total }),
+        );
+
+        if (enriched.length > 0) {
+          await api.entities.Bill.bulkUpdateCommitteeData(enriched);
+          console.log(
+            `[Committees] Enriched ${enriched.length} bills with committee + history data.`,
+            `${enriched.filter((e) => e.current_committee).length} have an active committee assignment.`,
+          );
+        }
+      } catch (enrichErr) {
+        // Non-fatal — basic bill list is already saved
+        console.warn("[Committees] Detail enrichment failed (non-fatal):", enrichErr);
+      }
+
+      // ── Phase 3: LC numbers for tracked bills ───────────────────────────
+      setPhase("lc");
+      try {
         const profile = await api.auth.me().catch(() => null);
         const personalTracked = profile?.tracked_bill_ids ?? [];
 
-        // Get team bill numbers
-        const allTeamData = await api.entities.Team.getAll().catch(() => ({
-          teams: [],
-        }));
-        const allTeams = allTeamData?.teams ?? [];
+        const allTeamData = await api.entities.Team.getAll().catch(() => ({ teams: [] }));
         let teamBillNumbers = [];
-        for (const team of allTeams) {
+        for (const team of allTeamData?.teams ?? []) {
           try {
             const nums = await api.entities.Team.getBillNumbers(team.id);
             teamBillNumbers = teamBillNumbers.concat(nums);
@@ -94,34 +127,27 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
           }
         }
 
-        // Union of personal + team tracked bill numbers
         const allTrackedNumbers = [
           ...new Set([...personalTracked, ...teamBillNumbers]),
         ];
-
-        // Find these bills in the freshly synced data (need legiscan_id)
         const trackedBillsWithIds = bills.filter(
           (b) => allTrackedNumbers.includes(b.bill_number) && b.legiscan_id,
         );
 
         if (trackedBillsWithIds.length > 0) {
-          setLcProgress({ current: 0, total: trackedBillsWithIds.length });
+          setPhaseProgress({ current: 0, total: trackedBillsWithIds.length });
 
           const lcResults = await fetchLCNumbersForBills(
             trackedBillsWithIds,
-            (current, total) => setLcProgress({ current, total }),
+            (current, total) => setPhaseProgress({ current, total }),
           );
 
-          // Build entries for batch operations
           const lcEntries = Object.entries(lcResults)
             .filter(([, lc]) => lc)
             .map(([bill_number, lc_number]) => ({ bill_number, lc_number }));
 
           if (lcEntries.length > 0) {
-            // Update bills table with LC numbers
             await api.entities.Bill.updateLcNumbers(lcEntries);
-
-            // Update LC tracking (detects changes)
             await api.LcTracking.batchUpsert(lcEntries);
           }
 
@@ -132,23 +158,20 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
       } catch (lcErr) {
         console.warn("[LC] LC enrichment failed (non-fatal):", lcErr);
       }
-      setLcProgress(null);
 
+      setPhase(null);
       setSyncStatus({
         success: true,
         message: `Synced ${bills.length} bills from LegiScan`,
-        newBills: bills.length,
         total: bills.length,
       });
 
-      // Auto-dismiss success banner after 3 seconds
-      setTimeout(() => setSyncStatus(null), 3000);
+      setTimeout(() => setSyncStatus(null), 4000);
 
-      if (onSyncComplete) {
-        onSyncComplete();
-      }
+      if (onSyncComplete) onSyncComplete();
     } catch (error) {
       const msg = error.message || "Failed to sync bills. Please try again.";
+      setPhase(null);
       setSyncStatus({
         success: false,
         maintenance: isMaintenance(msg),
@@ -160,17 +183,27 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
     }
 
     setIsSyncing(false);
-    setLcProgress(null);
   };
 
   useEffect(() => {
     if (autoSync && !autoSyncFired.current && !isSyncing) {
       autoSyncFired.current = true;
-      // Pre-check: skip auto-sync if LegiScan just told us it's in maintenance
       if (syncStatus?.maintenance) return;
       syncBillsFromWebsite();
     }
   }, [autoSync, syncStatus?.maintenance]);
+
+  const progressPct =
+    phaseProgress.total > 0
+      ? Math.round((phaseProgress.current / phaseProgress.total) * 100)
+      : 0;
+
+  const phaseIcon =
+    phase === "committees" ? (
+      <Landmark className="w-3 h-3" />
+    ) : (
+      <FileSearch className="w-3 h-3" />
+    );
 
   return (
     <div className="space-y-3">
@@ -186,7 +219,7 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
         {isSyncing ? (
           <>
             <RefreshCw className="w-4 h-4 animate-spin" />
-            Syncing from LegiScan...
+            Syncing from LegiScan…
           </>
         ) : syncStatus?.maintenance ? (
           <>
@@ -201,47 +234,37 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
         )}
       </Button>
 
-      {isSyncing && progress.total > 0 && (
+      {isSyncing && phase && (
         <Card className="border-blue-200 bg-blue-50">
-          <CardContent className="p-4">
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-blue-900 font-medium">
-                  {lcProgress
-                    ? "Fetching LC numbers for tracked bills..."
-                    : "Processing bills..."}
-                </span>
-                <Badge className="bg-blue-600 text-white">
-                  {lcProgress
-                    ? `${lcProgress.current} / ${lcProgress.total}`
-                    : `${progress.current} / ${progress.total}`}
+          <CardContent className="p-4 space-y-2">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-blue-900 font-medium">
+                <PhaseLabel phase={phase} />
+              </span>
+              {phaseProgress.total > 0 && (
+                <Badge className="bg-blue-600 text-white tabular-nums">
+                  {phaseProgress.current} / {phaseProgress.total}
                 </Badge>
-              </div>
-              <div className="w-full bg-blue-200 rounded-full h-2">
-                <div
-                  className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                  style={{
-                    width: `${
-                      lcProgress
-                        ? (lcProgress.current / lcProgress.total) * 100
-                        : (progress.current / progress.total) * 100
-                    }%`,
-                  }}
-                />
-              </div>
-              {lcProgress ? (
-                <p className="text-xs text-blue-800 flex items-center gap-1">
-                  <FileSearch className="w-3 h-3" />
-                  Extracting LC numbers from bill texts…
-                </p>
-              ) : (
-                progress.newBills > 0 && (
-                  <p className="text-xs text-blue-800">
-                    Found {progress.newBills} new bills
-                  </p>
-                )
               )}
             </div>
+
+            {phaseProgress.total > 0 && (
+              <div className="w-full bg-blue-200 rounded-full h-2">
+                <div
+                  className="bg-blue-600 h-2 rounded-full transition-all duration-150"
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
+            )}
+
+            <p className="text-xs text-blue-700 flex items-center gap-1">
+              {phaseIcon}
+              {phase === "committees"
+                ? "Fetching full bill details so the Committees tab can show historical data. This takes a few minutes."
+                : phase === "lc"
+                  ? "Extracting LC draft numbers from bill texts…"
+                  : "Downloading bill list…"}
+            </p>
           </CardContent>
         </Card>
       )}
@@ -259,11 +282,11 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
           <CardContent className="p-4">
             <div className="flex items-start gap-3">
               {syncStatus.success ? (
-                <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-green-600 shrink-0 mt-0.5" />
               ) : syncStatus.maintenance ? (
-                <WrenchIcon className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                <WrenchIcon className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
               ) : (
-                <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
               )}
               <div className="space-y-1">
                 <p
@@ -278,18 +301,9 @@ export default function BillSyncButton({ onSyncComplete, autoSync = false }) {
                   {syncStatus.message}
                 </p>
                 {syncStatus.success && (
-                  <div className="flex gap-3 text-sm text-green-800">
-                    <span>
-                      New Bills: <strong>{syncStatus.newBills}</strong>
-                    </span>
-                    <span>
-                      Total: <strong>{syncStatus.total}</strong>
-                    </span>
-                    <span>
-                      Already Exists:{" "}
-                      <strong>{syncStatus.total - syncStatus.newBills}</strong>
-                    </span>
-                  </div>
+                  <p className="text-sm text-green-800">
+                    Total bills synced: <strong>{syncStatus.total}</strong>
+                  </p>
                 )}
                 {syncStatus.error && (
                   <p className="text-xs text-red-700">{syncStatus.error}</p>

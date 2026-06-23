@@ -193,14 +193,23 @@ create table if not exists public.team_members (
 
 alter table public.team_members enable row level security;
 
+create or replace function public.get_my_team_ids()
+returns setof uuid
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select id from public.teams where created_by = auth.uid()
+  union
+  select team_id from public.team_members
+    where user_id = auth.uid() and status = 'active';
+$$;
+
 create policy "Team participants can read members"
   on public.team_members for select
   using (
-    team_id in (
-      select id   from public.teams        where created_by = auth.uid()
-      union
-      select team_id from public.team_members where user_id = auth.uid()
-    )
+    team_id in (select public.get_my_team_ids())
   );
 
 create policy "Team owners can manage members"
@@ -219,7 +228,7 @@ create policy "Users can activate their own invite"
 create policy "Team members can read their team"
   on public.teams for select
   using (
-    id in (select team_id from public.team_members where user_id = auth.uid())
+    id in (select public.get_my_team_ids())
   );
 
 -- ─── Team Bills ───────────────────────────────────────────────
