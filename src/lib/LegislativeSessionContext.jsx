@@ -35,6 +35,7 @@ export function LegislativeSessionProvider({ children }) {
   const [allSessionSyncProgress, setAllSessionSyncProgress] = useState({
     completed: 0,
     currentSession: null,
+    skipped: 0,
     total: 0,
   });
 
@@ -66,7 +67,12 @@ export function LegislativeSessionProvider({ children }) {
   );
 
   const sessionsSignature = sessions
-    .map((session) => session.session_id)
+    .map(
+      (session) =>
+        `${session.session_id}:${session.dataset_hash || "none"}:${
+          session.prior ? "prior" : "current"
+        }`,
+    )
     .join(",");
   const {
     data: allSessionSyncResult,
@@ -79,11 +85,18 @@ export function LegislativeSessionProvider({ children }) {
       setAllSessionSyncProgress({
         completed: 0,
         currentSession: null,
-        total: sessions.length,
+        skipped: 0,
+        total: 0,
       });
       return syncAllBillSessions({
         sessions,
         state: STATE,
+        onPlan: ({ total, skipped }) =>
+          setAllSessionSyncProgress((progress) => ({
+            ...progress,
+            skipped: skipped.length,
+            total,
+          })),
         onSessionStart: (session) =>
           setAllSessionSyncProgress((progress) => ({
             ...progress,
@@ -174,6 +187,7 @@ export function LegislativeSessionProvider({ children }) {
       isSyncingAllSessions,
       allSessionSyncProgress,
       allSessionSyncFailures: allSessionSyncResult?.failures ?? [],
+      allSessionSyncSkipped: allSessionSyncResult?.skipped ?? [],
       lastAllSessionsSyncAt: allSessionSyncResult?.completedAt ?? null,
       syncAllSessions,
       allSessionSyncError,

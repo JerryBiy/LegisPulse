@@ -14,8 +14,8 @@ LegisPulse tracks Georgia legislative bills and provides AI-generated bill analy
 - **Committees** — browse official committees, members, all bills, and saved bills that are currently assigned
 - **Twitter/X feed** — embedded legislative news feed
 - **Account profile & settings** — display name, username, and avatar upload
-- Sync every available Georgia session from LegiScan via lightweight master lists
-- Auto-sync all sessions on the first authenticated app load without per-bill enrichment fan-out
+- Store every available Georgia session from LegiScan via lightweight master lists
+- Auto-refresh current sessions and reuse historical archives until LegiScan's dataset hash changes
 - Show newest bills first (higher bill number first)
 - Search by bill number/text with improved exact matching (e.g. `HB10` and `HB 10`)
 - Track/untrack bills — persisted to your account across devices
@@ -48,9 +48,16 @@ requires its explicit, separately verified ID pair.
 
 Session syncs use database RPC upserts that update only provider-owned fields;
 they do not delete the session or overwrite user summaries, analysis, tags, or
-PDF links. Automatic all-session refreshes skip committee, people, sponsor, and
+PDF links. Current sessions are refreshed automatically. Historical sessions
+are stored once in the shared Supabase `legislative_bill_cache` and skipped
+until LegiScan's `dataset_hash` reports an archive correction. New accounts
+hydrate their user-owned bill rows from that database-local cache without a
+LegiScan request. Automatic refreshes also skip committee, people, sponsor, and
 history fan-out calls while preserving richer stored fields. Detail calls remain
 change-aware and processed in bounded batches when explicitly requested.
+Migration 037 promotes migration 036's per-user metadata and seeds the shared
+archive from historical sessions already present in `bills`, so they do not
+require another first-run LegiScan download.
 
 ## Team Feature
 
@@ -127,6 +134,8 @@ Attachments are uploaded to a Supabase Storage bucket named `team-chat-files`. S
 | `026_lc_history_all_bills.sql`  | Adds `legislation_id` to `bill_lc_history` for all-bills tracking             |
 | `034_legiscan_session_isolation.sql` | Session keys, safe sync/legacy RPCs, and scoped indexes                |
 | `035_remove_legacy_session_zero.sql` | Purges ambiguous legacy rows and requires positive session IDs         |
+| `036_bill_session_sync_state.sql` | Original per-user LegiScan session dataset-version metadata               |
+| `037_shared_legislative_bill_archive.sql` | Promotes 036 to a shared archive for instant history       |
 
 Run each migration in the Supabase **SQL Editor** in order.
 
@@ -381,7 +390,7 @@ src/
     bills/
       BillCard.jsx       – bill card with track + add-to-team buttons + LC number
       BillDetailsModal   – bill details + AI analysis + track/team actions
-      BillSyncButton     – LegiScan sync action (auto-syncs when DB is empty)
+      BillSyncButton     – Refreshes current/changed LegiScan sessions
       BillFilters        – filter UI
   services/
     legiscan.js          – LegiScan API fetch/parsing + Comparison helpers

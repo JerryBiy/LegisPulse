@@ -9,6 +9,7 @@ const OPENAI_MODEL = import.meta.env.VITE_OPENAI_MODEL || "gpt-4o";
 const OPENAI_BASE_URL =
   import.meta.env.VITE_OPENAI_BASE_URL || "https://api.openai.com/v1";
 const DEFAULT_STATE = "GA";
+const hydratedBillSessionKeys = new Set();
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -111,6 +112,9 @@ const makeBillRef = ({
   billNumber,
 }) =>
   `${state}:${requireSessionId(sessionId)}:${legiscanId || normalizeBillNumber(billNumber)}`;
+
+const makeHydratedBillSessionKey = (userId, state, sessionId) =>
+  `${userId}:${state}:${requireSessionId(sessionId)}`;
 
 const sortByField = (items, sortKey) => {
   if (!sortKey) return items;
@@ -339,6 +343,26 @@ export const api = {
       async list(sessionId, sortKey = "-last_action_date", state = DEFAULT_STATE) {
         const userId = await getUserId();
         const sid = requireSessionId(sessionId);
+        const hydrationKey = makeHydratedBillSessionKey(userId, state, sid);
+        if (!hydratedBillSessionKeys.has(hydrationKey)) {
+          const { error: hydrationError } = await supabase.rpc(
+            "hydrate_cached_session_bills",
+            {
+              p_state: state,
+              p_session_id: sid,
+            },
+          );
+          if (hydrationError) {
+            // Migration 037 may not be deployed yet. Continue with the user's
+            // existing rows so rollout order never makes the bill list fail.
+            console.warn(
+              "[Bills] Shared session archive hydration is unavailable.",
+              hydrationError,
+            );
+          } else {
+            hydratedBillSessionKeys.add(hydrationKey);
+          }
+        }
         const PAGE_SIZE = 1000;
         let allBills = [];
         let from = 0;
@@ -389,13 +413,34 @@ export const api = {
         // chunk leaves all pre-existing session data intact.
         const CHUNK_SIZE = 500;
         for (let index = 0; index < bills.length; index += CHUNK_SIZE) {
+          const chunk = bills.slice(index, index + CHUNK_SIZE);
+          const { error: cacheError } = await supabase.rpc(
+            "sync_legislative_bill_cache",
+            {
+              p_state: state,
+              p_session_id: sid,
+              p_bills: chunk,
+            },
+          );
+          if (cacheError) {
+            // Preserve the existing user-owned sync path until migration 037
+            // is deployed; the shared cache is an optimization, not a reason
+            // to hide otherwise valid provider results.
+            console.warn(
+              "[Bills] Shared legislative cache update is unavailable.",
+              cacheError,
+            );
+          }
           const { error } = await supabase.rpc("sync_session_bills", {
             p_state: state,
             p_session_id: sid,
-            p_bills: bills.slice(index, index + CHUNK_SIZE),
+            p_bills: chunk,
           });
           if (error) throw error;
         }
+        hydratedBillSessionKeys.add(
+          makeHydratedBillSessionKey(userId, state, sid),
+        );
         return this.list(sid, undefined, state);
       },
 
@@ -524,6 +569,45 @@ export const api = {
           const failed = responses.find((response) => response.error);
           if (failed?.error) throw failed.error;
         }
+      },
+    },
+
+    /** Provider dataset versions for the shared session bill archive. */
+    BillSessionSyncState: {
+      async list(state = DEFAULT_STATE) {
+        const { data, error } = await supabase
+          .from("bill_session_sync_state")
+          .select("*")
+          .eq("state", state);
+        if (error) throw error;
+        return data || [];
+      },
+
+      async upsert(session, billCount, state = DEFAULT_STATE) {
+        const sid = requireSessionId(session?.session_id);
+        const { data, error } = await supabase
+          .from("bill_session_sync_state")
+          .upsert(
+            {
+              state,
+              session_id: sid,
+              dataset_hash: session?.dataset_hash || null,
+              session_name:
+                session?.session_title || session?.session_name || null,
+              year_start: Number(session?.year_start) || null,
+              year_end: Number(session?.year_end) || null,
+              is_special: Boolean(session?.special),
+              is_prior: Boolean(session?.prior),
+              is_sine_die: Boolean(session?.sine_die),
+              bill_count: Math.max(0, Number(billCount) || 0),
+              last_synced_at: new Date().toISOString(),
+            },
+            { onConflict: "state,session_id" },
+          )
+          .select()
+          .single();
+        if (error) throw error;
+        return data;
       },
     },
 

@@ -29,13 +29,17 @@ export default function BillSyncButton({ onSyncComplete }) {
     try {
       const result = await syncAllSessions();
       const failures = result?.failures?.length ?? 0;
+      const refreshed = (result?.results?.length ?? 0) - failures;
+      const reused = result?.skipped?.length ?? 0;
       setSyncStatus({
         success: failures === 0,
         partial: failures > 0,
         message:
           failures > 0
-            ? `Updated ${result.results.length - failures} of ${sessions.length} sessions. ${failures} failed.`
-            : `All ${sessions.length} sessions are up to date.`,
+            ? `Updated ${refreshed} of ${result.results.length} selected sessions. ${failures} failed; ${reused} stored archives were reused.`
+            : refreshed > 0
+              ? `Updated ${refreshed} current or changed sessions. Reused ${reused} stored historical archives.`
+              : `No download needed. Reused ${reused} unchanged historical archives.`,
         total: result?.totalBills ?? 0,
       });
       onSyncComplete?.();
@@ -52,7 +56,7 @@ export default function BillSyncButton({ onSyncComplete }) {
   };
 
   const completed = allSessionSyncProgress.completed ?? 0;
-  const total = allSessionSyncProgress.total || sessions.length;
+  const total = allSessionSyncProgress.total ?? 0;
   const progressPercent = total > 0 ? Math.round((completed / total) * 100) : 0;
 
   return (
@@ -65,12 +69,12 @@ export default function BillSyncButton({ onSyncComplete }) {
         {isSyncingAllSessions ? (
           <>
             <RefreshCw className="w-4 h-4 animate-spin" />
-            Syncing all sessions…
+            Syncing current sessions...
           </>
         ) : (
           <>
             <Download className="w-4 h-4" />
-            Sync all sessions
+            Sync current sessions
           </>
         )}
       </Button>
@@ -80,7 +84,8 @@ export default function BillSyncButton({ onSyncComplete }) {
           <CardContent className="p-4 space-y-2">
             <div className="flex items-center justify-between gap-3 text-sm">
               <span className="text-blue-900 font-medium truncate">
-                {allSessionSyncProgress.currentSession || "Preparing LegiScan sessions…"}
+                {allSessionSyncProgress.currentSession ||
+                  "Checking stored session archives..."}
               </span>
               <Badge className="bg-blue-600 text-white tabular-nums">
                 {completed} / {total}
@@ -93,7 +98,7 @@ export default function BillSyncButton({ onSyncComplete }) {
               />
             </div>
             <p className="text-xs text-blue-700">
-              Updating every session so changing the global session never shows a stale bill list.
+              Current sessions are refreshed. Historical sessions are reused unless LegiScan reports an archive change.
             </p>
           </CardContent>
         </Card>

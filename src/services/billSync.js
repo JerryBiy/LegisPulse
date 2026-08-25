@@ -250,19 +250,48 @@ export function syncBillsForSession(options) {
   return task;
 }
 
+function sessionYear(session) {
+  return Number(session?.year_end || session?.year_start) || 0;
+}
+
+function getNewestSessionIds(sessions) {
+  const providerCurrent = sessions.filter((session) => session.prior === false);
+  if (providerCurrent.length > 0) {
+    return new Set(providerCurrent.map((session) => session.session_id));
+  }
+
+  // Defensive fallback for a provider response without a usable `prior`
+  // marker: refresh every regular/special session in the newest year group.
+  const newestYear = Math.max(...sessions.map(sessionYear));
+  return new Set(
+    sessions
+      .filter((session) => sessionYear(session) === newestYear)
+      .map((session) => session.session_id),
+  );
+}
+
+function archivedDatasetChanged(session, storedState) {
+  if (!storedState) return true;
+  const providerHash = session?.dataset_hash || null;
+  if (!providerHash) return false;
+  return providerHash !== (storedState.dataset_hash || null);
+}
+
 /**
- * Refresh every real LegiScan session as one background job. The master lists
- * are the currency boundary users care about when switching sessions; deeper
- * sponsor/history data remains lazy or session-specific so opening the app
- * does not burn hundreds of detail calls per historical session.
+ * Refresh current LegiScan sessions and seed each historical session once.
+ * Historical bill rows stay in Supabase and are fetched again only when
+ * LegiScan changes that session's dataset_hash. This preserves provider
+ * corrections without downloading every archive on every app load.
  */
 export function syncAllBillSessions({
   sessions,
   state = DEFAULT_STATE,
   concurrency = 4,
+  onPlan = (..._args) => {},
   onSessionStart = (..._args) => {},
   onSessionComplete = (..._args) => {},
   onMasterSaved = (..._args) => {},
+  onWarning = (message, error) => console.warn(message, error),
 }) {
   const validSessions = (sessions ?? []).filter((session) => {
     const sid = Number(session?.session_id);
@@ -273,31 +302,124 @@ export function syncAllBillSessions({
       completedAt: new Date().toISOString(),
       failures: [],
       results: [],
+      skipped: [],
+      checkedSessions: 0,
       totalBills: 0,
     });
   }
 
   const syncKey = `${state}:${validSessions
-    .map((session) => session.session_id)
+    .map(
+      (session) =>
+        `${session.session_id}:${session.dataset_hash || "none"}:${
+          session.prior ? "prior" : "current"
+        }`,
+    )
     .join(",")}`;
   const existing = pendingAllSessionSyncs.get(syncKey);
   if (existing) return existing;
 
   const task = (async () => {
-    const results = new Array(validSessions.length);
+    let storedSyncStates = null;
+    try {
+      storedSyncStates = await api.entities.BillSessionSyncState.list(state);
+    } catch (error) {
+      // Keep the existing all-session behavior until the session-cache
+      // migrations are applied.
+      // This avoids leaving a new user's archive empty during deployment.
+      onWarning(
+        "[Bills] Session sync metadata is unavailable; refreshing every session.",
+        error,
+      );
+    }
+
+    const storedBySessionId = new Map(
+      (storedSyncStates ?? []).map((entry) => [Number(entry.session_id), entry]),
+    );
+    const newestSessionIds = getNewestSessionIds(validSessions);
+
+    // Migration 037 backfills populated sessions without inventing a provider
+    // hash. Adopt the hash returned by getSessionList as the baseline instead
+    // of downloading those already-stored historical master lists once more.
+    if (storedSyncStates !== null) {
+      await Promise.all(
+        validSessions.map(async (session) => {
+          if (newestSessionIds.has(session.session_id)) return;
+          const storedState = storedBySessionId.get(session.session_id);
+          if (
+            !storedState ||
+            storedState.dataset_hash ||
+            !session.dataset_hash ||
+            Number(storedState.bill_count) <= 0
+          ) {
+            return;
+          }
+          try {
+            const adoptedState = await api.entities.BillSessionSyncState.upsert(
+              session,
+              storedState.bill_count,
+              state,
+            );
+            storedBySessionId.set(session.session_id, adoptedState);
+          } catch (error) {
+            // If baseline adoption fails, leave the hash unset so the normal
+            // planner safely refreshes this archive instead of assuming it is
+            // complete.
+            onWarning(
+              `[Bills] Could not register stored archive ${session.session_id}.`,
+              error,
+            );
+          }
+        }),
+      );
+    }
+
+    const syncSessions = [];
+    const skipped = [];
+
+    for (const session of validSessions) {
+      const storedState = storedBySessionId.get(session.session_id);
+      const isNewest = newestSessionIds.has(session.session_id);
+      const archiveChanged = archivedDatasetChanged(session, storedState);
+      if (storedSyncStates === null || isNewest || archiveChanged) {
+        syncSessions.push({
+          session,
+          reason: isNewest
+            ? "current"
+            : storedState
+              ? "archive-changed"
+              : "archive-seed",
+        });
+      } else {
+        skipped.push({
+          session,
+          reason: "stored-archive",
+          lastSyncedAt: storedState.last_synced_at,
+          billCount: storedState.bill_count,
+        });
+      }
+    }
+
+    onPlan({
+      sessions: syncSessions.map((entry) => entry.session),
+      skipped,
+      total: syncSessions.length,
+    });
+
+    const results = new Array(syncSessions.length);
     let cursor = 0;
     let completed = 0;
     const workerCount = Math.min(
-      validSessions.length,
+      syncSessions.length,
       Math.max(1, Number(concurrency) || 1),
     );
 
     const worker = async () => {
-      while (cursor < validSessions.length) {
+      while (cursor < syncSessions.length) {
         const index = cursor;
         cursor += 1;
-        const session = validSessions[index];
-        onSessionStart(session, index, validSessions.length);
+        const { session, reason } = syncSessions[index];
+        onSessionStart(session, index, syncSessions.length, reason);
         try {
           const result = await syncBillsForSession({
             sessionId: session.session_id,
@@ -307,16 +429,28 @@ export function syncAllBillSessions({
             sponsorEnrichmentLimit: 0,
             onMasterSaved: (bills) => onMasterSaved(session, bills),
           });
-          results[index] = { session, result, error: null };
+          try {
+            await api.entities.BillSessionSyncState.upsert(
+              session,
+              result.total,
+              state,
+            );
+          } catch (error) {
+            onWarning(
+              `[Bills] Could not save sync state for session ${session.session_id}.`,
+              error,
+            );
+          }
+          results[index] = { session, reason, result, error: null };
         } catch (error) {
-          results[index] = { session, result: null, error };
+          results[index] = { session, reason, result: null, error };
         } finally {
           completed += 1;
           onSessionComplete(
             session,
             results[index],
             completed,
-            validSessions.length,
+            syncSessions.length,
           );
         }
       }
@@ -328,6 +462,8 @@ export function syncAllBillSessions({
       completedAt: new Date().toISOString(),
       failures,
       results,
+      skipped,
+      checkedSessions: validSessions.length,
       totalBills: results.reduce(
         (sum, entry) => sum + (entry?.result?.total ?? 0),
         0,
