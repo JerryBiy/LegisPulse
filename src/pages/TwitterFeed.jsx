@@ -1,5 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { api } from "@/api/apiClient";
+import {
+  getSessionDisplayName,
+  useLegislativeSession,
+} from "@/lib/LegislativeSessionContext";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -9,34 +13,55 @@ import { Link } from "react-router-dom";
 import { createPageUrl } from "@/utils";
 
 export default function TwitterFeedPage() {
+  const { state, selectedSession, selectedSessionId, isReady } =
+    useLegislativeSession();
   const [trackedBills, setTrackedBills] = useState([]);
   const [user, setUser] = useState(null);
   const [showAllTweets, setShowAllTweets] = useState(false);
 
+  const sessionLabel = getSessionDisplayName(selectedSession);
+
   useEffect(() => {
-    loadData();
-  }, []);
+    let active = true;
+    setTrackedBills([]);
 
-  const loadData = async () => {
-    try {
-      const [userData, bills] = await Promise.all([
-        api.auth.me().catch(() => null),
-        api.entities.Bill.list(),
-      ]);
-
-      setUser(userData);
-      if (userData?.tracked_bill_ids) {
-        const filtered = bills.filter((bill) =>
-          userData.tracked_bill_ids.includes(bill.bill_number),
-        );
-        setTrackedBills(filtered);
-      }
-    } catch (error) {
-      console.error("Error loading data:", error);
+    if (!isReady || !selectedSessionId) {
+      return () => {
+        active = false;
+      };
     }
-  };
+
+    (async () => {
+      try {
+        const [userData, trackedBillNumbers, bills] = await Promise.all([
+          api.auth.me().catch(() => null),
+          api.entities.TrackedBill.getNumbers(selectedSessionId, state),
+          api.entities.Bill.list(selectedSessionId, undefined, state),
+        ]);
+        if (!active) return;
+
+        setUser(userData);
+        const trackedSet = new Set(trackedBillNumbers);
+        setTrackedBills(
+          bills.filter((bill) => trackedSet.has(bill.bill_number)),
+        );
+      } catch (error) {
+        if (!active) return;
+        console.error("Error loading data:", error);
+        setTrackedBills([]);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [isReady, selectedSessionId, state]);
 
   const trackedBillNumbers = trackedBills.map((bill) => bill.bill_number);
+  const trackedLegiscanIds = trackedBills
+    .map((bill) => bill.legiscan_id)
+    .filter((id) => id !== null && id !== undefined && id !== "")
+    .map(String);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -52,7 +77,8 @@ export default function TwitterFeedPage() {
                 Legislative Twitter Feed
               </h1>
               <p className="text-slate-600 mt-1">
-                Live updates from official Georgia Legislature accounts
+                Live updates from official Georgia Legislature accounts for{" "}
+                {sessionLabel}
               </p>
             </div>
           </div>
@@ -213,7 +239,11 @@ export default function TwitterFeedPage() {
 
         {/* Twitter Feed Component */}
         <TwitterFeed
+          key={`${state}:${selectedSessionId || "loading"}`}
+          state={state}
+          sessionId={selectedSessionId}
           trackedBillNumbers={trackedBillNumbers}
+          trackedLegiscanIds={trackedLegiscanIds}
           showAllTweets={showAllTweets}
         />
 

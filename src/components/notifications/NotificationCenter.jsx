@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { api } from "@/api/apiClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -13,39 +13,66 @@ import {
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
+import { useLegislativeSession } from "@/lib/LegislativeSessionContext";
 
-export default function NotificationCenter({ userId, onClose }) {
+export default function NotificationCenter({ userId, onClose: _onClose }) {
+  const { state, selectedSessionId, isReady } = useLegislativeSession();
   const [notifications, setNotifications] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [unreadCount, setUnreadCount] = useState(0);
+  const scopeKey = `${state}:${selectedSessionId ?? "none"}`;
+  const activeScopeRef = useRef(scopeKey);
+  activeScopeRef.current = scopeKey;
 
   useEffect(() => {
-    if (userId) {
-      loadNotifications();
-    }
-  }, [userId]);
+    let active = true;
+    setNotifications([]);
+    setUnreadCount(0);
 
-  const loadNotifications = async () => {
-    setIsLoading(true);
-    try {
-      const notifs = await api.entities.Notification.filter(
-        { user_id: userId },
-        "-created_date",
-        50,
-      );
-      setNotifications(notifs);
-      setUnreadCount(notifs.filter((n) => !n.is_read).length);
-    } catch (error) {
-      console.error("Error loading notifications:", error);
+    if (!userId || !isReady || !selectedSessionId) {
+      setIsLoading(false);
+      return () => {
+        active = false;
+      };
     }
-    setIsLoading(false);
-  };
+
+    setIsLoading(true);
+    const loadNotifications = async () => {
+      try {
+        const notifs = await api.entities.Notification.list(
+          selectedSessionId,
+          "-created_date",
+          50,
+          state,
+        );
+        if (!active) return;
+        setNotifications(notifs);
+        setUnreadCount(notifs.filter((n) => !n.is_read).length);
+      } catch (error) {
+        if (active) console.error("Error loading notifications:", error);
+      } finally {
+        if (active) setIsLoading(false);
+      }
+    };
+
+    loadNotifications();
+    return () => {
+      active = false;
+    };
+  }, [isReady, selectedSessionId, state, userId]);
 
   const markAsRead = async (notificationId) => {
+    const originScope = scopeKey;
+    const originSessionId = selectedSessionId;
+    const originState = state;
     try {
-      await api.entities.Notification.update(notificationId, {
-        is_read: true,
-      });
+      await api.entities.Notification.update(
+        notificationId,
+        { is_read: true },
+        originSessionId,
+        originState,
+      );
+      if (originScope !== activeScopeRef.current) return;
       setNotifications((prev) =>
         prev.map((n) =>
           n.id === notificationId ? { ...n, is_read: true } : n,
@@ -58,13 +85,22 @@ export default function NotificationCenter({ userId, onClose }) {
   };
 
   const markAllAsRead = async () => {
+    const originScope = scopeKey;
+    const originSessionId = selectedSessionId;
+    const originState = state;
+    const unreadIds = notifications
+      .filter((notification) => !notification.is_read)
+      .map((notification) => notification.id);
     try {
-      const unreadIds = notifications
-        .filter((n) => !n.is_read)
-        .map((n) => n.id);
       for (const id of unreadIds) {
-        await api.entities.Notification.update(id, { is_read: true });
+        await api.entities.Notification.update(
+          id,
+          { is_read: true },
+          originSessionId,
+          originState,
+        );
       }
+      if (originScope !== activeScopeRef.current) return;
       setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
       setUnreadCount(0);
     } catch (error) {
@@ -73,8 +109,16 @@ export default function NotificationCenter({ userId, onClose }) {
   };
 
   const deleteNotification = async (notificationId) => {
+    const originScope = scopeKey;
+    const originSessionId = selectedSessionId;
+    const originState = state;
     try {
-      await api.entities.Notification.delete(notificationId);
+      await api.entities.Notification.delete(
+        notificationId,
+        originSessionId,
+        originState,
+      );
+      if (originScope !== activeScopeRef.current) return;
       setNotifications((prev) => prev.filter((n) => n.id !== notificationId));
     } catch (error) {
       console.error("Error deleting notification:", error);

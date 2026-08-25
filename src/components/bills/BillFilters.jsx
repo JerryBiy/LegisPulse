@@ -119,28 +119,6 @@ export default function BillFilters({ filters, onFilterChange, billCounts }) {
               </SelectContent>
             </Select>
 
-            <Select
-              value={filters.session_year?.toString() || "all"}
-              onValueChange={(value) =>
-                onFilterChange({
-                  ...filters,
-                  session_year: value === "all" ? null : parseInt(value, 10),
-                })
-              }
-            >
-              <SelectTrigger className="w-32 border-slate-200">
-                <SelectValue placeholder="Year" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Years</SelectItem>
-                <SelectItem value="2026">2026</SelectItem>
-                <SelectItem value="2025">2025</SelectItem>
-                <SelectItem value="2024">2024</SelectItem>
-                <SelectItem value="2023">2023</SelectItem>
-                <SelectItem value="2022">2022</SelectItem>
-              </SelectContent>
-            </Select>
-
             <Button
               variant="outline"
               onClick={() => onFilterChange({})}

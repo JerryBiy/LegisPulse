@@ -60,7 +60,14 @@ async function getToken() {
   return pendingTokenPromise;
 }
 
-async function apiFetch(path, { method = "GET", body, retry = true } = {}) {
+async function apiFetch(
+  path,
+  /** @type {{method?: string, body?: any, retry?: boolean}} */ {
+    method = "GET",
+    body,
+    retry = true,
+  } = {},
+) {
   const token = await getToken();
   const res = await fetch(`${API_BASE}${path}`, {
     method,
@@ -87,19 +94,219 @@ async function apiFetch(path, { method = "GET", body, retry = true } = {}) {
 }
 
 // ─── Sessions ────────────────────────────────────────────────
-let cachedCurrentSessionId = null;
+let cachedSessionDirectory = null;
+let cachedSessionDirectoryAt = 0;
+
+const configuredLegiscanSessionId = Number(
+  import.meta.env.VITE_LEGIS_GA_LEGISCAN_SESSION_ID,
+);
+const configuredGaSessionId = Number(
+  import.meta.env.VITE_LEGIS_GA_SESSION_ID,
+);
+
+const isPositiveSessionId = (value) =>
+  Number.isSafeInteger(Number(value)) && Number(value) > 0;
+
+/** Backwards-compatible check for the optional deployment override. */
+export function isLegisGaSessionMapped(legiscanSessionId) {
+  return (
+    isPositiveSessionId(configuredLegiscanSessionId) &&
+    isPositiveSessionId(configuredGaSessionId) &&
+    Number(legiscanSessionId) === configuredLegiscanSessionId
+  );
+}
+
+async function getSessionDirectory() {
+  if (
+    cachedSessionDirectory &&
+    Date.now() - cachedSessionDirectoryAt < 10 * 60 * 1000
+  ) {
+    return cachedSessionDirectory;
+  }
+  const data = await apiFetch("/committees/details/87");
+  cachedSessionDirectory = data ?? {};
+  cachedSessionDirectoryAt = Date.now();
+  return cachedSessionDirectory;
+}
+
+function sessionYears(session) {
+  const explicitStart = Number(
+    session?.yearStart ?? session?.year_start ?? session?.startYear,
+  );
+  const explicitEnd = Number(
+    session?.yearEnd ?? session?.year_end ?? session?.endYear,
+  );
+  const label = [
+    session?.name,
+    session?.description,
+    session?.title,
+    session?.label,
+    session?.sessionName,
+    session?.session_name,
+    session?.library,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const labelYears = [...label.matchAll(/\b(20\d{2})\b/g)].map((match) =>
+    Number(match[1]),
+  );
+  return {
+    start: explicitStart || labelYears[0] || null,
+    end: explicitEnd || labelYears[1] || labelYears[0] || null,
+    label,
+  };
+}
+
+function normalizeProviderSession(session) {
+  const id = Number(
+    session?.id ??
+      session?.sessionId ??
+      session?.session_id ??
+      session?.value ??
+      session?.key,
+  );
+  if (!isPositiveSessionId(id)) return null;
+  const { start, end, label } = sessionYears(session);
+  const specialFlag =
+    session?.special ??
+    session?.isSpecial ??
+    session?.is_special ??
+    (session?.type != null ? Number(session.type) === 2 : null);
+  const special =
+    specialFlag == null
+      ? /\bspecial\b/i.test(label)
+      : specialFlag === true || Number(specialFlag) === 1;
+  return {
+    id,
+    start,
+    end,
+    label:
+      session?.description ||
+      session?.name ||
+      session?.sessionName ||
+      session?.session_name ||
+      label,
+    library: String(session?.library || "").trim(),
+    special,
+  };
+}
+
+function sessionMapping(legiscanSessionId, providerSession, source) {
+  const specialNumberMatch = providerSession.library.match(/EX(\d*)$/i);
+  return {
+    legiscanSessionId,
+    gaSessionId: providerSession.id,
+    gaSessionLabel: providerSession.label,
+    gaSessionLibrary: providerSession.library,
+    isSpecialSession: providerSession.special,
+    specialSessionNumber: providerSession.special
+      ? Number(specialNumberMatch?.[1] || 1)
+      : null,
+    yearStart: providerSession.start,
+    yearEnd: providerSession.end,
+    source,
+  };
+}
 
 /**
- * Resolve the current session id by inspecting any committee's `sessions`
- * list. Cached for the lifetime of the page.
+ * Resolve the current provider session id from a committee detail response.
+ * Cached briefly so a provider-side session change is revalidated.
  */
 export async function getCurrentSessionId() {
-  if (cachedCurrentSessionId) return cachedCurrentSessionId;
-  // Committee id 87 (Ag & Consumer Affairs) is a long-standing committee that
-  // is guaranteed to exist; its details include the sessions list.
-  const data = await apiFetch("/committees/details/87");
-  cachedCurrentSessionId = data?.sessionId ?? null;
-  return cachedCurrentSessionId;
+  const data = await getSessionDirectory();
+  return data?.sessionId ?? null;
+}
+
+/**
+ * Resolve a LegiScan session to the separate legis.ga.gov session namespace.
+ * The provider's session directory is matched by year range and regular vs.
+ * special session. LegiScan IDs are never passed to legis.ga.gov endpoints.
+ */
+export async function resolveLegisGaSessionMapping(legiscanSession) {
+  const legiscanSessionId = Number(legiscanSession?.session_id);
+  if (!isPositiveSessionId(legiscanSessionId)) {
+    throw new Error("A valid LegiScan session is required.");
+  }
+
+  const directory = await getSessionDirectory();
+  const sessions = (Array.isArray(directory?.sessions) ? directory.sessions : [])
+    .map(normalizeProviderSession)
+    .filter(Boolean);
+  const selectedStart = Number(legiscanSession?.year_start) || null;
+  const selectedEnd = Number(legiscanSession?.year_end) || selectedStart;
+  const selectedSpecial = Boolean(legiscanSession?.special);
+
+  if (isLegisGaSessionMapped(legiscanSessionId)) {
+    const configured = sessions.find(
+      (session) => session.id === configuredGaSessionId,
+    );
+    if (!configured) {
+      throw new Error(
+        "The configured legis.ga.gov session is not present in the official session directory.",
+      );
+    }
+    if (
+      selectedStart &&
+      (configured.start !== selectedStart ||
+        configured.end !== selectedEnd ||
+        configured.special !== selectedSpecial)
+    ) {
+      throw new Error(
+        "The configured legis.ga.gov session does not match the selected LegiScan session.",
+      );
+    }
+    return sessionMapping(legiscanSessionId, configured, "configuration");
+  }
+
+  const exact = sessions.filter(
+    (session) =>
+      selectedStart &&
+      session.start === selectedStart &&
+      session.end === selectedEnd &&
+      session.special === selectedSpecial,
+  );
+  if (exact.length === 1) {
+    return sessionMapping(
+      legiscanSessionId,
+      exact[0],
+      "provider-directory",
+    );
+  }
+
+  const currentId = Number(directory?.sessionId);
+  const current = sessions.find((session) => session.id === currentId);
+  if (
+    isPositiveSessionId(currentId) &&
+    !selectedSpecial &&
+    selectedStart &&
+    current?.start === selectedStart &&
+    current?.end === selectedEnd &&
+    !current.special
+  ) {
+    return sessionMapping(
+      legiscanSessionId,
+      current,
+      "provider-current-session",
+    );
+  }
+
+  throw new Error(
+    "No exact legis.ga.gov session matches the selected LegiScan session.",
+  );
+}
+
+/** Compatibility wrapper for callers that only have a configured ID pair. */
+export async function verifyLegisGaSessionMapping(legiscanSessionId) {
+  if (!isLegisGaSessionMapped(legiscanSessionId)) {
+    throw new Error(
+      "No verified legis.ga.gov mapping is configured for this LegiScan session.",
+    );
+  }
+  return {
+    legiscanSessionId: Number(legiscanSessionId),
+    gaSessionId: configuredGaSessionId,
+    source: "configuration",
+  };
 }
 
 // ─── Bill versions (LC / substitute tracking) ────────────────
@@ -167,17 +374,18 @@ export async function fetchBillVersionsGa(legislationId) {
  * Fetch all committees in the given chamber for the current session.
  * @param {number} chamber  CHAMBER.HOUSE | CHAMBER.SENATE
  */
-export async function fetchCommittees(chamber) {
-  const sessionId = await getCurrentSessionId();
+export async function fetchCommittees(chamber, providerSessionId = null) {
+  const sessionId = providerSessionId ?? (await getCurrentSessionId());
   if (!sessionId) return [];
   const list = await apiFetch(`/committees/List/${sessionId}`);
   return (list ?? [])
-    .filter((c) => c.chamber === chamber)
+    .filter((c) => Number(c.chamber) === Number(chamber))
     .map((c) => ({
       id: c.id,
       name: c.name,
-      chamber: CHAMBER_NAME[c.chamber] ?? "Unknown",
-      sessionId: c.sessionId,
+      chamber: CHAMBER_NAME[Number(c.chamber)] ?? "Unknown",
+      chamberType: Number(c.chamber),
+      sessionId: c.sessionId ?? sessionId,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -186,16 +394,16 @@ export async function fetchCommittees(chamber) {
  * Fetch every committee in the current session (all chambers).
  * Result includes a numeric `chamberType` (1=House, 2=Senate, 3=Joint).
  */
-export async function fetchAllCommittees() {
-  const sessionId = await getCurrentSessionId();
+export async function fetchAllCommittees(providerSessionId = null) {
+  const sessionId = providerSessionId ?? (await getCurrentSessionId());
   if (!sessionId) return [];
   const list = await apiFetch(`/committees/List/${sessionId}`);
   return (list ?? []).map((c) => ({
     id: c.id,
     name: c.name,
-    chamberType: c.chamber,
-    chamber: CHAMBER_NAME[c.chamber] ?? "Unknown",
-    sessionId: c.sessionId,
+    chamberType: Number(c.chamber),
+    chamber: CHAMBER_NAME[Number(c.chamber)] ?? "Unknown",
+    sessionId: c.sessionId ?? sessionId,
   }));
 }
 
@@ -273,10 +481,22 @@ export function matchMeetingToCommittee(meeting, committees) {
 /**
  * Fetch full details for a single committee (members, address, sessions, …).
  */
-export async function fetchCommitteeDetails(committeeId) {
+export async function fetchCommitteeDetails(
+  committeeId,
+  expectedProviderSessionId = null,
+) {
   if (!committeeId) return null;
   const data = await apiFetch(`/committees/details/${committeeId}`);
   if (!data) return null;
+  if (
+    expectedProviderSessionId != null &&
+    isPositiveSessionId(data.sessionId) &&
+    Number(data.sessionId) !== Number(expectedProviderSessionId)
+  ) {
+    throw new Error(
+      "legis.ga.gov returned committee details from a different session.",
+    );
+  }
   return {
     id: data.id,
     name: data.name,
@@ -333,7 +553,17 @@ function buildLegisUrl(bill) {
   return `https://www.legis.ga.gov/legislation/${bill.legislationId}`;
 }
 
-function normalizeBill(bill) {
+function committeeReferenceId(reference) {
+  const value =
+    reference?.id ??
+    reference?.committeeId ??
+    reference?.committee_id ??
+    reference;
+  const numeric = Number(value);
+  return Number.isSafeInteger(numeric) ? numeric : null;
+}
+
+function normalizeBill(bill, committeeId) {
   const identifier = buildBillIdentifier(bill);
   const sponsors = (bill.sponsors ?? []).map((s) => ({
     name: (s.name ?? "").trim().replace(/,\s*/, ", "),
@@ -356,6 +586,9 @@ function normalizeBill(bill) {
     session: bill.session ?? null,
     houseCommittee: bill.houseCommittee ?? null,
     senateCommittee: bill.senateCommittee ?? null,
+    isCurrentlyAssigned:
+      committeeReferenceId(bill.houseCommittee) === Number(committeeId) ||
+      committeeReferenceId(bill.senateCommittee) === Number(committeeId),
     sponsors,
     // Convenience fields used by the existing BillRow component
     abstract: "",
@@ -395,7 +628,19 @@ export async function fetchCommitteeBills(committeeId, sessionId = null) {
     if (page > 20) break; // safety
   }
 
-  return all.map(normalizeBill);
+  if (
+    all.some(
+      (bill) =>
+        isPositiveSessionId(bill?.session?.id) &&
+        Number(bill.session.id) !== Number(sid),
+    )
+  ) {
+    throw new Error(
+      "legis.ga.gov returned committee bills from a different session.",
+    );
+  }
+
+  return all.map((bill) => normalizeBill(bill, committeeId));
 }
 
 // ─── Calendar / Meetings ─────────────────────────────────────
@@ -418,7 +663,113 @@ function chamberQueryValue(chamber) {
   return null;
 }
 
-function normalizeMeeting(m) {
+function getMeetingProviderSessionId(meeting) {
+  const value =
+    meeting?.sessionId ??
+    meeting?.session_id ??
+    meeting?.legislativeSessionId ??
+    meeting?.legislative_session_id ??
+    meeting?.session?.id ??
+    meeting?.session?.sessionId ??
+    null;
+  const numeric = Number(value);
+  return isPositiveSessionId(numeric) ? numeric : null;
+}
+
+const meetingDateKey = (meeting) =>
+  String(meeting?.start_time ?? meeting?.start ?? "").slice(0, 10);
+
+const meetingTitle = (meeting) =>
+  String(meeting?.title ?? meeting?.subject ?? "").trim();
+
+/**
+ * Discover special-session boundaries from official floor-session entries.
+ * The meetings API has no session field, but each called session restarts its
+ * legislative-day counter at LD1. The range ends on that cluster's last floor
+ * day (Georgia special sessions are constitutionally short).
+ */
+export function deriveSpecialSessionWindows(meetings) {
+  const floorMeetings = (meetings ?? []).filter((meeting) =>
+    /floor session/i.test(meetingTitle(meeting)),
+  );
+  const starts = [
+    ...new Set(
+      floorMeetings
+        .filter((meeting) => /\bLD\s*1\b/i.test(meetingTitle(meeting)))
+        .map(meetingDateKey)
+        .filter(Boolean),
+    ),
+  ].sort();
+
+  return starts.map((startDate, index) => {
+    const nextStart = starts[index + 1] ?? null;
+    const maxEnd = new Date(`${startDate}T12:00:00Z`);
+    maxEnd.setUTCDate(maxEnd.getUTCDate() + 45);
+    const maxEndKey = maxEnd.toISOString().slice(0, 10);
+    const floorDates = floorMeetings
+      .map(meetingDateKey)
+      .filter(
+        (date) =>
+          date >= startDate &&
+          date <= maxEndKey &&
+          (!nextStart || date < nextStart),
+      )
+      .sort();
+    return {
+      startDate,
+      endDate: floorDates.at(-1) || startDate,
+    };
+  });
+}
+
+const isInterimStudyMeeting = (meeting) =>
+  /\b(?:study committee|blue[- ]ribbon)\b/i.test(meetingTitle(meeting));
+
+/**
+ * Keep meetings on the selected side of regular/special session boundaries.
+ * Special sessions fail closed when their LD1 window cannot be identified.
+ */
+export function filterMeetingsForSession(meetings, mapping, specialWindows) {
+  if (!mapping) return [];
+  const windows = specialWindows ?? [];
+  if (mapping.isSpecialSession) {
+    const target = windows[(mapping.specialSessionNumber || 1) - 1];
+    if (!target) return [];
+    return (meetings ?? [])
+      .filter((meeting) => {
+        const date = meetingDateKey(meeting);
+        return (
+          date >= target.startDate &&
+          date <= target.endDate &&
+          !isInterimStudyMeeting(meeting)
+        );
+      })
+      .map((meeting) => ({
+        ...meeting,
+        is_special_session: true,
+        session_label: mapping.gaSessionLabel || "Special Session",
+      }));
+  }
+
+  return (meetings ?? [])
+    .filter((meeting) => {
+      const date = meetingDateKey(meeting);
+      return !windows.some(
+        (window) => date >= window.startDate && date <= window.endDate,
+      );
+    })
+    .map((meeting) => ({
+      ...meeting,
+      is_special_session: false,
+      session_label: mapping.gaSessionLabel || "Regular Session",
+    }));
+}
+
+function normalizeMeeting(m, providerSession = null) {
+  const providerSessionId =
+    typeof providerSession === "object"
+      ? providerSession?.gaSessionId
+      : providerSession;
   const startIso = m.start ?? new Date().toISOString();
   const startDate = new Date(startIso);
   // The API does not return an end time; default to +1h
@@ -442,6 +793,10 @@ function normalizeMeeting(m) {
   // The direct livestream URL the website uses (e.g. a Vimeo showcase URL).
   // This already points to the correct room/chamber video — no need to guess.
   const videoUrl = m.livestreamUrl || null;
+  const rawAgendaUrl = String(m.agendaUri || "").trim();
+  const agendaUrl = /^https?:\/\//i.test(rawAgendaUrl)
+    ? rawAgendaUrl.replace(/^http:\/\//i, "https://")
+    : null;
 
   // Build a public legis.ga.gov link for the meeting (the schedule page)
   const dateStr = `${startDate.getMonth() + 1}-${startDate.getDate()}-${startDate.getFullYear()}`;
@@ -460,13 +815,26 @@ function normalizeMeeting(m) {
     classification,
     bills: [], // not exposed by this endpoint
     participants: [],
-    links: m.agendaUri ? [{ url: m.agendaUri, note: "Agenda (PDF)" }] : [],
+    links: agendaUrl ? [{ url: agendaUrl, note: "Agenda (PDF)" }] : [],
     videoUrl,
-    agendaUrl: m.agendaUri || null,
+    agendaUrl,
     scheduleUrl,
     willBroadcast: !!m.willBroadcast,
     isVimeo: !!m.isVimeo,
     chamber: m.chamber,
+    provider_session_id:
+      getMeetingProviderSessionId(m) ??
+      (isPositiveSessionId(providerSessionId)
+        ? Number(providerSessionId)
+        : null),
+    session_label:
+      typeof providerSession === "object"
+        ? providerSession?.gaSessionLabel || null
+        : null,
+    is_special_session:
+      typeof providerSession === "object"
+        ? Boolean(providerSession?.isSpecialSession)
+        : false,
     _source: "legis-ga",
   };
 }
@@ -477,9 +845,15 @@ function normalizeMeeting(m) {
  * @param {string|Date} startDate
  * @param {string|Date} endDate
  * @param {1|2|3|null|"house"|"senate"} [chamber]  Optional chamber filter
+ * @param {number|object|null} [expectedProviderSession] verified mapping or id
  * @returns {Promise<Array>}
  */
-export async function fetchGAMeetings(startDate, endDate, chamber = null) {
+export async function fetchGAMeetings(
+  startDate,
+  endDate,
+  chamber = null,
+  expectedProviderSession = null,
+) {
   if (!startDate || !endDate) return [];
 
   const params = new URLSearchParams();
@@ -488,13 +862,26 @@ export async function fetchGAMeetings(startDate, endDate, chamber = null) {
   const ch = chamberQueryValue(chamber);
   if (ch != null) params.set("chamber", String(ch));
 
-  let data;
-  try {
-    data = await apiFetch(`/meetings?${params.toString()}`);
-  } catch (err) {
-    console.warn("legis.ga.gov meetings fetch failed:", err.message);
-    return [];
-  }
+  const data = await apiFetch(`/meetings?${params.toString()}`);
   if (!Array.isArray(data)) return [];
-  return data.map(normalizeMeeting);
+  const expectedProviderSessionId =
+    typeof expectedProviderSession === "object"
+      ? expectedProviderSession?.gaSessionId
+      : expectedProviderSession;
+  if (expectedProviderSessionId != null) {
+    const expected = Number(expectedProviderSessionId);
+    const sessionIds = data.map(getMeetingProviderSessionId);
+    if (
+      sessionIds.some(
+        (sessionId) => sessionId != null && sessionId !== expected,
+      )
+    ) {
+      throw new Error(
+        "legis.ga.gov returned meetings from a different provider session.",
+      );
+    }
+  }
+  return data.map((meeting) =>
+    normalizeMeeting(meeting, expectedProviderSession),
+  );
 }

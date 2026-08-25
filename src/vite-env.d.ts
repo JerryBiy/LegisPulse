@@ -2,6 +2,8 @@
 
 interface ImportMetaEnv {
   readonly VITE_LEGISCAN_API_KEY: string;
+  readonly VITE_LEGIS_GA_LEGISCAN_SESSION_ID?: string;
+  readonly VITE_LEGIS_GA_SESSION_ID?: string;
   readonly VITE_OPENAI_API_KEY?: string;
   readonly VITE_OPENAI_MODEL?: string;
   readonly VITE_OPENAI_BASE_URL?: string;

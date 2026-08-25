@@ -64,6 +64,7 @@ import BillDetailsModal from "@/components/bills/BillDetailsModal";
 import TeamChat from "@/components/TeamChat";
 import { useResizableHeight, ResizeHandle } from "@/hooks/use-resizable-height";
 import { supabase } from "@/lib/supabase";
+import { useLegislativeSession } from "@/lib/LegislativeSessionContext";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const TEAM_COLORS = [
@@ -111,6 +112,7 @@ const extractBillNum = (bn) => {
  *   defaultOpen - whether the team section starts open
  */
 export default function TeamSection({ team, onLeave, defaultOpen = true }) {
+  const { state, selectedSessionId, isReady } = useLegislativeSession();
   const queryClient = useQueryClient();
   const { user: authUser } = useAuth();
   const teamId = team.id;
@@ -267,9 +269,10 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
   });
 
   const { data: teamBillNumbers = [] } = useQuery({
-    queryKey: ["teamBills", teamId],
-    queryFn: () => api.entities.Team.getBillNumbers(teamId),
-    enabled: !!teamId,
+    queryKey: ["teamBills", teamId, state, selectedSessionId],
+    queryFn: () =>
+      api.entities.Team.getBillNumbers(teamId, selectedSessionId, state),
+    enabled: isReady && !!teamId,
     // staleTime: 0 ensures this always re-fetches on mount, overriding the
     // global 5-minute staleTime that would otherwise serve a stale empty
     // array cached from before any bills were added.
@@ -279,28 +282,42 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
   });
 
   const { data: allBills = [] } = useQuery({
-    queryKey: ["bills"],
-    queryFn: () => api.entities.Bill.list(),
+    queryKey: ["bills", state, selectedSessionId],
+    queryFn: () => api.entities.Bill.list(selectedSessionId, undefined, state),
+    enabled: isReady,
   });
 
   // Fetch shared bill data from teammates via RPC so we can see
   // bill rows that belong to other team members.
   const { data: sharedBillData = [] } = useQuery({
-    queryKey: ["sharedTeamBillData", teamId, teamBillNumbers],
-    queryFn: () => api.entities.Team.getSharedTeamBillData(teamBillNumbers),
-    enabled: teamBillNumbers.length > 0,
+    queryKey: [
+      "sharedTeamBillData",
+      teamId,
+      state,
+      selectedSessionId,
+      teamBillNumbers,
+    ],
+    queryFn: () =>
+      api.entities.Team.getSharedTeamBillData(
+        teamBillNumbers,
+        selectedSessionId,
+        state,
+      ),
+    enabled: isReady && teamBillNumbers.length > 0,
     staleTime: 0,
   });
 
-  const { data: userData } = useQuery({
-    queryKey: ["profile"],
-    queryFn: () => api.auth.me().catch(() => null),
+  const { data: trackedBillIds = [] } = useQuery({
+    queryKey: ["trackedBills", state, selectedSessionId],
+    queryFn: () => api.entities.TrackedBill.getNumbers(selectedSessionId, state),
+    enabled: isReady,
   });
 
   const { data: billMeta = {} } = useQuery({
-    queryKey: ["teamBillMeta", teamId],
-    queryFn: () => api.entities.Team.getBillMetadata(teamId),
-    enabled: !!teamId,
+    queryKey: ["teamBillMeta", teamId, state, selectedSessionId],
+    queryFn: () =>
+      api.entities.Team.getBillMetadata(teamId, selectedSessionId, state),
+    enabled: isReady && !!teamId,
   });
 
   // Keep team bill views in sync across teammates in real time.
@@ -317,8 +334,12 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
           filter: `team_id=eq.${teamId}`,
         },
         () => {
-          queryClient.invalidateQueries({ queryKey: ["teamBills", teamId] });
-          queryClient.invalidateQueries({ queryKey: ["teamBillMeta", teamId] });
+          queryClient.invalidateQueries({
+            queryKey: ["teamBills", teamId, state, selectedSessionId],
+          });
+          queryClient.invalidateQueries({
+            queryKey: ["teamBillMeta", teamId, state, selectedSessionId],
+          });
           queryClient.invalidateQueries({ queryKey: ["allTeamBills"] });
           queryClient.invalidateQueries({ queryKey: ["allTeamBillNumbers"] });
           queryClient.invalidateQueries({
@@ -331,15 +352,14 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [teamId, queryClient]);
+  }, [teamId, queryClient, selectedSessionId, state]);
 
   // ── LC Tracking data ───────────────────────────────────────────────────────
   const { data: lcTrackingMap = {} } = useQuery({
-    queryKey: ["lcTracking"],
-    queryFn: () => api.LcTracking.getAll(),
+    queryKey: ["lcTracking", state, selectedSessionId],
+    queryFn: () => api.LcTracking.getAll(selectedSessionId, state),
+    enabled: isReady,
   });
-
-  const trackedBillIds = userData?.tracked_bill_ids ?? [];
 
   // Merge local user's bills with shared teammate bill data.
   // Local copies take priority (user's own data is preferred).
@@ -383,22 +403,9 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
   }
 
   // LC change count for this team (unseen only, for badge)
-  const lcUnseenTeamCount = useMemo(() => {
-    return teamBills.filter((b) => {
-      const track = lcTrackingMap[b.bill_number];
-      return (
-        track &&
-        track.previous_lc &&
-        track.previous_lc !== track.current_lc &&
-        !track.change_seen
-      );
-    }).length;
-  }, [teamBills, lcTrackingMap]);
-
-  // Mark team LC changes as seen when team section is opened
-  useEffect(() => {
-    if (teamOpen && lcUnseenTeamCount > 0) {
-      const unseenBillNumbers = teamBills
+  const unseenTeamBillNumbers = useMemo(
+    () =>
+      teamBills
         .filter((b) => {
           const track = lcTrackingMap[b.bill_number];
           return (
@@ -408,18 +415,44 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
             !track.change_seen
           );
         })
-        .map((b) => b.bill_number);
-      if (unseenBillNumbers.length > 0) {
-        api.LcTracking.markBillsSeen(unseenBillNumbers)
-          .then(() => {
-            queryClient.invalidateQueries({ queryKey: ["lcTracking"] });
-          })
-          .catch(() => {
-            /* non-critical */
-          });
-      }
+        .map((b) => b.bill_number),
+    [teamBills, lcTrackingMap],
+  );
+  const lcUnseenTeamCount = unseenTeamBillNumbers.length;
+
+  // Mark team LC changes as seen whenever the open section receives data for
+  // the selected session, including after a session switch.
+  useEffect(() => {
+    if (
+      !teamOpen ||
+      !isReady ||
+      !selectedSessionId ||
+      unseenTeamBillNumbers.length === 0
+    ) {
+      return;
     }
-  }, [teamOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    api.LcTracking.markBillsSeen(
+      unseenTeamBillNumbers,
+      selectedSessionId,
+      state,
+    )
+      .then(() => {
+        queryClient.invalidateQueries({
+          queryKey: ["lcTracking", state, selectedSessionId],
+        });
+      })
+      .catch(() => {
+        /* non-critical */
+      });
+  }, [
+    isReady,
+    queryClient,
+    selectedSessionId,
+    state,
+    teamOpen,
+    unseenTeamBillNumbers,
+  ]);
 
   // Sort bills: LC-changed bills (active) first, then normal sort
   const sortedTeamBills = useMemo(() => {
@@ -457,20 +490,29 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
   // ── Mutations ──────────────────────────────────────────────────────────────
   const updateMetaMutation = useMutation({
     mutationFn: ({ billNumber, fields }) =>
-      api.entities.Team.updateBillMetadata(teamId, billNumber, fields),
+      api.entities.Team.updateBillMetadata(
+        teamId,
+        billNumber,
+        fields,
+        selectedSessionId,
+        state,
+      ),
     onMutate: async ({ billNumber, fields }) => {
-      await queryClient.cancelQueries({ queryKey: ["teamBillMeta", teamId] });
-      const prev = queryClient.getQueryData(["teamBillMeta", teamId]);
-      queryClient.setQueryData(["teamBillMeta", teamId], (old) => ({
+      const key = ["teamBillMeta", teamId, state, selectedSessionId];
+      await queryClient.cancelQueries({ queryKey: key });
+      const prev = queryClient.getQueryData(key);
+      queryClient.setQueryData(key, (old) => ({
         ...old,
         [billNumber]: { ...(old?.[billNumber] || {}), ...fields },
       }));
-      return { prev };
+      return { prev, key };
     },
     onError: (_e, _v, ctx) =>
-      queryClient.setQueryData(["teamBillMeta", teamId], ctx.prev),
+      queryClient.setQueryData(ctx.key, ctx.prev),
     onSettled: () =>
-      queryClient.invalidateQueries({ queryKey: ["teamBillMeta", teamId] }),
+      queryClient.invalidateQueries({
+        queryKey: ["teamBillMeta", teamId, state, selectedSessionId],
+      }),
   });
 
   const handleMetaChange = useCallback(
@@ -517,19 +559,27 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
 
   const removeBillMutation = useMutation({
     mutationFn: (billNumber) =>
-      api.entities.Team.removeBill(teamId, billNumber),
+      api.entities.Team.removeBill(
+        teamId,
+        billNumber,
+        selectedSessionId,
+        state,
+      ),
     onMutate: async (billNumber) => {
-      await queryClient.cancelQueries({ queryKey: ["teamBills", teamId] });
-      const prev = queryClient.getQueryData(["teamBills", teamId]);
-      queryClient.setQueryData(["teamBills", teamId], (old) =>
+      const key = ["teamBills", teamId, state, selectedSessionId];
+      await queryClient.cancelQueries({ queryKey: key });
+      const prev = queryClient.getQueryData(key);
+      queryClient.setQueryData(key, (old) =>
         (old ?? []).filter((n) => n !== billNumber),
       );
-      return { prev };
+      return { prev, key };
     },
     onError: (_e, _b, ctx) =>
-      queryClient.setQueryData(["teamBills", teamId], ctx.prev),
+      queryClient.setQueryData(ctx.key, ctx.prev),
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["teamBills", teamId] });
+      queryClient.invalidateQueries({
+        queryKey: ["teamBills", teamId, state, selectedSessionId],
+      });
       queryClient.invalidateQueries({ queryKey: ["allTeamBillNumbers"] });
       queryClient.invalidateQueries({ queryKey: ["allTeamBills"] });
     },
@@ -557,6 +607,7 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
 
   // ── Selected bill (for modal) ──────────────────────────────────────────────
   const [selectedBill, setSelectedBill] = useState(null);
+  useEffect(() => setSelectedBill(null), [selectedSessionId]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -1065,7 +1116,12 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
                                                 }
                                                 onChange={(e) =>
                                                   queryClient.setQueryData(
-                                                    ["teamBillMeta", teamId],
+                                                    [
+                                                      "teamBillMeta",
+                                                      teamId,
+                                                      state,
+                                                      selectedSessionId,
+                                                    ],
                                                     (old) => ({
                                                       ...old,
                                                       [bill.bill_number]: {

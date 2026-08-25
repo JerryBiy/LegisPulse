@@ -1,6 +1,11 @@
 // @ts-nocheck
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/apiClient";
+import {
+  getSessionDisplayName,
+  useLegislativeSession,
+} from "@/lib/LegislativeSessionContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,26 +22,47 @@ import { ArrowLeft, Save, Plus, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { createPageUrl } from "@/utils";
 
+const createEmptyBillData = () => ({
+  bill_number: "",
+  title: "",
+  chamber: "",
+  bill_type: "",
+  lc_number: "",
+  sponsor: "",
+  co_sponsors: [],
+  status: "introduced",
+  current_committee: "",
+  ocga_sections_affected: [],
+  pdf_url: "",
+  last_action: "",
+  last_action_date: "",
+  tags: [],
+});
+
 export default function BillForm() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const {
+    state,
+    selectedSession,
+    selectedSessionId,
+    isReady,
+    isBootstrappingBills,
+  } = useLegislativeSession();
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [billData, setBillData] = useState({
-    bill_number: "",
-    title: "",
-    chamber: "",
-    bill_type: "",
-    lc_number: "",
-    sponsor: "",
-    co_sponsors: [],
-    session_year: 2026,
-    status: "introduced",
-    current_committee: "",
-    ocga_sections_affected: [],
-    pdf_url: "",
-    last_action: "",
-    last_action_date: "",
-    tags: [],
-  });
+  const [billData, setBillData] = useState(createEmptyBillData);
+  const formScopeKey = `${state}:${selectedSessionId ?? "none"}`;
+  const activeScopeRef = useRef(formScopeKey);
+  const draftScopeRef = useRef(formScopeKey);
+  const submitRequestRef = useRef(0);
+  activeScopeRef.current = formScopeKey;
+
+  useEffect(() => {
+    submitRequestRef.current += 1;
+    draftScopeRef.current = formScopeKey;
+    setBillData(createEmptyBillData());
+    setIsSubmitting(false);
+  }, [formScopeKey]);
 
   const handleInputChange = (field, value) => {
     setBillData((prev) => ({ ...prev, [field]: value }));
@@ -60,15 +86,59 @@ export default function BillForm() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (
+      !isReady ||
+      isBootstrappingBills ||
+      !selectedSessionId ||
+      !selectedSession ||
+      draftScopeRef.current !== formScopeKey
+    ) {
+      return;
+    }
+    const requestId = ++submitRequestRef.current;
+    const originScope = formScopeKey;
+    const originSession = selectedSession;
+    const originSessionId = selectedSessionId;
+    const originState = state;
     setIsSubmitting(true);
 
     try {
-      await api.entities.Bill.create(billData);
+      const sessionName = getSessionDisplayName(originSession);
+      const createdBill = await api.entities.Bill.create(
+        {
+          ...billData,
+          session_year: Number(originSession.year_start) || null,
+          session: sessionName,
+          session_name: sessionName,
+        },
+        originSessionId,
+        originState,
+      );
+      if (
+        requestId !== submitRequestRef.current ||
+        originScope !== activeScopeRef.current
+      ) {
+        return;
+      }
+      const billsKey = ["bills", originState, originSessionId];
+      queryClient.setQueryData(billsKey, (current = []) => [
+        createdBill,
+        ...current.filter((bill) => bill.id !== createdBill.id),
+      ]);
+      await queryClient.invalidateQueries({ queryKey: billsKey });
       navigate(createPageUrl("Dashboard"));
     } catch (error) {
-      console.error("Error creating bill:", error);
+      if (requestId === submitRequestRef.current) {
+        console.error("Error creating bill:", error);
+      }
+    } finally {
+      if (
+        requestId === submitRequestRef.current &&
+        originScope === activeScopeRef.current
+      ) {
+        setIsSubmitting(false);
+      }
     }
-    setIsSubmitting(false);
   };
 
   return (
@@ -86,7 +156,7 @@ export default function BillForm() {
           <div>
             <h1 className="text-2xl font-bold text-slate-900">Add New Bill</h1>
             <p className="text-slate-600">
-              Enter the details of a new legislative bill
+              Enter a bill for {getSessionDisplayName(selectedSession)}
             </p>
           </div>
         </div>
@@ -233,18 +303,12 @@ export default function BillForm() {
                   </Select>
                 </div>
                 <div>
-                  <Label htmlFor="session_year">Session Year</Label>
-                  <Input
-                    id="session_year"
-                    type="number"
-                    value={billData.session_year}
-                    onChange={(e) =>
-                      handleInputChange(
-                        "session_year",
-                        parseInt(e.target.value),
-                      )
-                    }
-                  />
+                  <Label>Legislative Session</Label>
+                  <div className="flex min-h-10 items-center rounded-md border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700">
+                    {isReady
+                      ? getSessionDisplayName(selectedSession)
+                      : "Loading selected session..."}
+                  </div>
                 </div>
                 <div>
                   <Label htmlFor="pdf_url">PDF URL</Label>
@@ -329,7 +393,7 @@ export default function BillForm() {
             </Button>
             <Button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !isReady || isBootstrappingBills}
               className="bg-blue-600 hover:bg-blue-700"
             >
               {isSubmitting ? (

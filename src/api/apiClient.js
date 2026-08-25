@@ -8,6 +8,7 @@ const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
 const OPENAI_MODEL = import.meta.env.VITE_OPENAI_MODEL || "gpt-4o";
 const OPENAI_BASE_URL =
   import.meta.env.VITE_OPENAI_BASE_URL || "https://api.openai.com/v1";
+const DEFAULT_STATE = "GA";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -19,6 +20,97 @@ const getUserId = async () => {
   if (!session?.user?.id) throw new Error("Not authenticated");
   return session.user.id;
 };
+
+const requireSessionId = (sessionId) => {
+  const value = Number(sessionId);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error("A valid LegiScan session_id is required.");
+  }
+  return value;
+};
+
+const normalizeBillNumber = (billNumber) =>
+  String(billNumber || "")
+    .replace(/\s+/g, "")
+    .toUpperCase();
+
+const stripImmutableFields = (value, immutableFields) => {
+  const mutable = {};
+  for (const [key, fieldValue] of Object.entries(value ?? {})) {
+    if (!immutableFields.has(key)) mutable[key] = fieldValue;
+  }
+  return mutable;
+};
+
+const BILL_IMMUTABLE_FIELDS = new Set([
+  "id",
+  "user_id",
+  "state",
+  "session_id",
+  "session_name",
+  "session",
+  "session_year",
+  "bill_number",
+  "legiscan_id",
+  "created_date",
+]);
+
+const USER_BILL_META_IMMUTABLE_FIELDS = new Set([
+  "id",
+  "user_id",
+  "state",
+  "session_id",
+  "bill_number",
+  "legiscan_id",
+  "created_at",
+  "updated_at",
+]);
+
+const CALENDAR_EVENT_IMMUTABLE_FIELDS = new Set([
+  "id",
+  "user_id",
+  "state",
+  "session_id",
+  "created_at",
+  "updated_at",
+]);
+
+const TEAM_BILL_IMMUTABLE_FIELDS = new Set([
+  "id",
+  "team_id",
+  "state",
+  "session_id",
+  "bill_number",
+  "legiscan_id",
+  "added_by",
+  "added_at",
+]);
+
+const TRANSCRIPT_IMMUTABLE_FIELDS = new Set([
+  "id",
+  "state",
+  "session_id",
+  "meeting_id",
+  "created_by",
+  "created_at",
+  "updated_at",
+]);
+
+const normalizeEmailAddresses = (value) => [
+  ...new Set(
+    (Array.isArray(value) ? value : [])
+      .map((email) => String(email ?? "").trim())
+      .filter(Boolean),
+  ),
+];
+
+const makeBillRef = ({
+  state = DEFAULT_STATE,
+  sessionId,
+  legiscanId,
+  billNumber,
+}) =>
+  `${state}:${requireSessionId(sessionId)}:${legiscanId || normalizeBillNumber(billNumber)}`;
 
 const sortByField = (items, sortKey) => {
   if (!sortKey) return items;
@@ -143,7 +235,6 @@ export const api = {
         "organization",
         "timezone",
         "bio",
-        "tracked_bill_ids",
         "twitter_notifications_enabled",
         "phone_notifications_enabled",
         "email_notifications_enabled",
@@ -245,8 +336,9 @@ export const api = {
   // ─── Entities ──────────────────────────────────────────────────────────────
   entities: {
     Bill: {
-      async list(sortKey = "-last_action_date") {
+      async list(sessionId, sortKey = "-last_action_date", state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const PAGE_SIZE = 1000;
         let allBills = [];
         let from = 0;
@@ -256,6 +348,8 @@ export const api = {
             .from("bills")
             .select("*")
             .eq("user_id", userId)
+            .eq("state", state)
+            .eq("session_id", sid)
             .range(from, from + PAGE_SIZE - 1);
 
           if (error) throw error;
@@ -273,39 +367,56 @@ export const api = {
         });
       },
 
-      async replaceAll(payloads) {
+      async replaceAll(payloads, sessionId, state = DEFAULT_STATE) {
         const userId = await getUserId();
-        const now = Date.now();
-        const bills = payloads.map((payload, idx) => ({
+        const sid = requireSessionId(sessionId);
+        const bills = payloads.map((payload) => ({
           id:
             payload.id ||
-            `bill-${payload.bill_number?.replace(/\s+/g, "-")}-${now}-${idx}`,
-          user_id: userId,
+            `bill-${userId}-${makeBillRef({
+              state,
+              sessionId: sid,
+              legiscanId: payload.legiscan_id,
+              billNumber: payload.bill_number,
+            }).replace(/:/g, "-")}`,
           ...payload,
-          created_date: payload.created_date || new Date().toISOString(),
+          bill_number: normalizeBillNumber(payload.bill_number),
         }));
 
-        // Delete all existing bills for this user, then insert new ones
-        await supabase.from("bills").delete().eq("user_id", userId);
-        if (bills.length === 0) return [];
-
-        const { data, error } = await supabase
-          .from("bills")
-          .insert(bills)
-          .select();
-        if (error) throw error;
-        return data ?? [];
+        // Provider sync is upsert-only: the database RPC updates provider
+        // fields but preserves user summaries, analysis, tags, PDFs, history,
+        // and manually-created rows. Chunking bounds request size; any failed
+        // chunk leaves all pre-existing session data intact.
+        const CHUNK_SIZE = 500;
+        for (let index = 0; index < bills.length; index += CHUNK_SIZE) {
+          const { error } = await supabase.rpc("sync_session_bills", {
+            p_state: state,
+            p_session_id: sid,
+            p_bills: bills.slice(index, index + CHUNK_SIZE),
+          });
+          if (error) throw error;
+        }
+        return this.list(sid, undefined, state);
       },
 
-      async create(payload) {
+      async create(payload, sessionId, state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const id =
           payload.id ||
-          `bill-${payload.bill_number?.replace(/\s+/g, "-")}-${Date.now()}`;
+          `bill-${userId}-${makeBillRef({
+            state,
+            sessionId: sid,
+            legiscanId: payload.legiscan_id,
+            billNumber: payload.bill_number,
+          }).replace(/:/g, "-")}`;
         const newBill = {
           id,
           user_id: userId,
           ...payload,
+          bill_number: normalizeBillNumber(payload.bill_number),
+          state,
+          session_id: sid,
           created_date: payload.created_date || new Date().toISOString(),
         };
         const { data, error } = await supabase
@@ -317,50 +428,70 @@ export const api = {
         return data;
       },
 
-      async update(id, patch) {
+      async update(id, patch, sessionId, state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
+        const mutablePatch = stripImmutableFields(
+          patch,
+          BILL_IMMUTABLE_FIELDS,
+        );
+        if (Object.keys(mutablePatch).length === 0) {
+          throw new Error("No mutable bill fields were provided.");
+        }
         const { data, error } = await supabase
           .from("bills")
-          .update(patch)
+          .update(mutablePatch)
           .eq("id", id)
           .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid)
           .select()
           .single();
         if (error) throw error;
         return data;
       },
 
-      async delete(id) {
+      async delete(id, sessionId, state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const { error } = await supabase
           .from("bills")
           .delete()
           .eq("id", id)
-          .eq("user_id", userId);
+          .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid);
         if (error) throw error;
         return { success: true };
       },
 
-      async clearAll() {
+      async clearAll(sessionId, state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const { error } = await supabase
           .from("bills")
           .delete()
-          .eq("user_id", userId);
+          .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid);
         if (error) throw error;
         return { success: true };
       },
 
       /** Bulk update lc_number for bills by bill_number. */
-      async updateLcNumbers(entries) {
+      async updateLcNumbers(entries, sessionId, state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         for (const { bill_number, lc_number } of entries) {
           if (!lc_number) continue;
-          await supabase
+          const { error } = await supabase
             .from("bills")
             .update({ lc_number })
             .eq("user_id", userId)
-            .eq("bill_number", bill_number);
+            .eq("state", state)
+            .eq("session_id", sid)
+            .eq("bill_number", normalizeBillNumber(bill_number));
+          if (error) throw error;
         }
       },
 
@@ -369,29 +500,142 @@ export const api = {
        * Called after the detailed enrichment pass (enrichBillsWithDetails) completes.
        * Runs batches of concurrent Supabase updates to avoid overloading the connection.
        *
-       * @param {Array<{legiscan_id: number|string, current_committee: string|null, history: Array}>} updates
+       * @param {Array<{legiscan_id: number|string, current_committee: string|null, history: Array<unknown>, extra: Record<string, unknown>}>} updates
        */
-      async bulkUpdateCommitteeData(updates) {
+      async bulkUpdateCommitteeData(updates, sessionId, state = DEFAULT_STATE) {
         if (!updates.length) return;
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const CONCURRENCY = 10;
 
         for (let i = 0; i < updates.length; i += CONCURRENCY) {
           const chunk = updates.slice(i, i + CONCURRENCY);
-          await Promise.allSettled(
-            chunk.map(({ legiscan_id, current_committee, history }) =>
+          const responses = await Promise.all(
+            chunk.map(({ legiscan_id, current_committee, history, extra }) =>
               supabase
                 .from("bills")
-                .update({ current_committee, history })
+                .update({ current_committee, history, extra })
                 .eq("user_id", userId)
+                .eq("state", state)
+                .eq("session_id", sid)
                 .eq("legiscan_id", String(legiscan_id)),
             ),
           );
+          const failed = responses.find((response) => response.error);
+          if (failed?.error) throw failed.error;
         }
       },
     },
 
+    /** Personal tracked bills, isolated by LegiScan session_id. */
+    TrackedBill: {
+      async list(sessionId, state = DEFAULT_STATE) {
+        const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
+        const { data, error } = await supabase
+          .from("tracked_bill_ids")
+          .select("bill_id, bill_number, legiscan_id, state, session_id")
+          .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid);
+        if (error) throw error;
+        return data ?? [];
+      },
+
+      async getNumbers(sessionId, state = DEFAULT_STATE) {
+        const rows = await this.list(sessionId, state);
+        return rows.map((row) => row.bill_number).filter(Boolean);
+      },
+
+      async add(sessionId, bill, state = DEFAULT_STATE) {
+        const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
+        const billNumber = normalizeBillNumber(bill?.bill_number || bill);
+        if (!billNumber) throw new Error("A bill number is required.");
+        const legiscanId = bill?.legiscan_id ? String(bill.legiscan_id) : null;
+        const billId = makeBillRef({
+          state,
+          sessionId: sid,
+          legiscanId,
+          billNumber,
+        });
+        const { error } = await supabase.from("tracked_bill_ids").upsert(
+          {
+            user_id: userId,
+            bill_id: billId,
+            bill_number: billNumber,
+            legiscan_id: legiscanId,
+            state,
+            session_id: sid,
+          },
+          { onConflict: "user_id,state,session_id,bill_number" },
+        );
+        if (error) throw error;
+      },
+
+      async remove(sessionId, billNumber, state = DEFAULT_STATE) {
+        const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
+        const { error } = await supabase
+          .from("tracked_bill_ids")
+          .delete()
+          .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid)
+          .eq("bill_number", normalizeBillNumber(billNumber));
+        if (error) throw error;
+      },
+    },
+
     EmailList: {
+      _fromRow(row) {
+        const extra =
+          row?.extra && typeof row.extra === "object" && !Array.isArray(row.extra)
+            ? row.extra
+            : {};
+        const emailAddresses = normalizeEmailAddresses(
+          row?.recipients ?? row?.email_addresses,
+        );
+        return {
+          ...row,
+          recipients: emailAddresses,
+          extra,
+          email_addresses: emailAddresses,
+          is_active: extra.is_active !== false,
+        };
+      },
+
+      _toDbPatch(payload) {
+        const patch = {};
+        if (payload?.name !== undefined) patch.name = payload.name;
+        if (payload?.description !== undefined) {
+          patch.description = payload.description;
+        }
+        if (
+          payload?.recipients !== undefined ||
+          payload?.email_addresses !== undefined
+        ) {
+          patch.recipients = normalizeEmailAddresses(
+            payload.email_addresses ?? payload.recipients,
+          );
+        }
+        if (payload?.extra !== undefined || payload?.is_active !== undefined) {
+          const extra =
+            payload.extra &&
+            typeof payload.extra === "object" &&
+            !Array.isArray(payload.extra)
+              ? payload.extra
+              : {};
+          patch.extra = {
+            ...extra,
+            ...(payload.is_active !== undefined
+              ? { is_active: Boolean(payload.is_active) }
+              : {}),
+          };
+        }
+        return patch;
+      },
+
       async list(sortKey = "-created_date") {
         const userId = await getUserId();
         const { data, error } = await supabase
@@ -399,7 +643,7 @@ export const api = {
           .select("*")
           .eq("user_id", userId);
         if (error) throw error;
-        return sortByField(data ?? [], sortKey);
+        return sortByField(data ?? [], sortKey).map(this._fromRow);
       },
 
       async create(payload) {
@@ -408,7 +652,7 @@ export const api = {
         const newList = {
           id,
           user_id: userId,
-          ...payload,
+          ...this._toDbPatch(payload),
           created_date: payload.created_date || new Date().toISOString(),
         };
         const { data, error } = await supabase
@@ -417,28 +661,97 @@ export const api = {
           .select()
           .single();
         if (error) throw error;
-        return data;
+        return this._fromRow(data);
+      },
+
+      async update(id, payload) {
+        const userId = await getUserId();
+        const dbPatch = this._toDbPatch(payload);
+        if (Object.keys(dbPatch).length === 0) {
+          throw new Error("No mutable email-list fields were provided.");
+        }
+        const { data, error } = await supabase
+          .from("email_lists")
+          .update(dbPatch)
+          .eq("id", id)
+          .eq("user_id", userId)
+          .select()
+          .single();
+        if (error) throw error;
+        return this._fromRow(data);
+      },
+
+      async delete(id) {
+        const userId = await getUserId();
+        const { error } = await supabase
+          .from("email_lists")
+          .delete()
+          .eq("id", id)
+          .eq("user_id", userId);
+        if (error) throw error;
+        return { success: true };
       },
     },
 
     Notification: {
-      async list(sortKey = "-created_date", limit = 50) {
+      _fromRow(row) {
+        return {
+          ...row,
+          notification_type: row.type,
+          related_bill_id: row.bill_id,
+          is_read: Boolean(row.read),
+          priority: row.extra?.priority ?? "medium",
+          sent_to_phone: Boolean(row.extra?.sent_to_phone),
+        };
+      },
+
+      async list(
+        sessionId,
+        sortKey = "-created_date",
+        limit = 50,
+        state = DEFAULT_STATE,
+      ) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const { data, error } = await supabase
           .from("notifications")
           .select("*")
           .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid)
           .limit(limit);
         if (error) throw error;
-        return sortByField(data ?? [], sortKey);
+        return sortByField(data ?? [], sortKey).map(this._fromRow);
       },
 
-      async create(payload) {
+      async create(payload, sessionId, state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
+        const extra = {
+          ...(payload.extra ?? {}),
+          ...(payload.priority ? { priority: payload.priority } : {}),
+          ...(payload.sent_to_phone !== undefined
+            ? { sent_to_phone: Boolean(payload.sent_to_phone) }
+            : {}),
+        };
         const newNotification = {
-          id: payload.id || `notif-${Date.now()}`,
+          id:
+            payload.id ||
+            `notif-${userId}-${state}-${sid}-${Date.now()}`,
           user_id: userId,
-          ...payload,
+          state,
+          session_id: sid,
+          legiscan_id: payload.legiscan_id
+            ? String(payload.legiscan_id)
+            : null,
+          type: payload.type || payload.notification_type || "bill_update",
+          title: payload.title || "Legislative update",
+          message: payload.message || "",
+          bill_id:
+            normalizeBillNumber(payload.bill_id || payload.related_bill_id) ||
+            null,
+          read: Boolean(payload.read ?? payload.is_read),
+          extra,
           created_date: payload.created_date || new Date().toISOString(),
         };
         const { data, error } = await supabase
@@ -447,32 +760,132 @@ export const api = {
           .select()
           .single();
         if (error) throw error;
-        return { status: "sent", ...data };
+        return { status: "sent", ...this._fromRow(data) };
+      },
+
+      async update(id, patch, sessionId, state = DEFAULT_STATE) {
+        const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
+        const dbPatch = {};
+        if (patch.type !== undefined || patch.notification_type !== undefined) {
+          dbPatch.type = patch.type ?? patch.notification_type;
+        }
+        if (patch.title !== undefined) dbPatch.title = patch.title;
+        if (patch.message !== undefined) dbPatch.message = patch.message;
+        if (patch.bill_id !== undefined || patch.related_bill_id !== undefined) {
+          dbPatch.bill_id =
+            normalizeBillNumber(patch.bill_id ?? patch.related_bill_id) || null;
+        }
+        if (patch.read !== undefined || patch.is_read !== undefined) {
+          dbPatch.read = Boolean(patch.read ?? patch.is_read);
+        }
+        if (
+          patch.extra !== undefined ||
+          patch.priority !== undefined ||
+          patch.sent_to_phone !== undefined
+        ) {
+          dbPatch.extra = {
+            ...(patch.extra ?? {}),
+            ...(patch.priority !== undefined
+              ? { priority: patch.priority }
+              : {}),
+            ...(patch.sent_to_phone !== undefined
+              ? { sent_to_phone: Boolean(patch.sent_to_phone) }
+              : {}),
+          };
+        }
+        const { data, error } = await supabase
+          .from("notifications")
+          .update(dbPatch)
+          .eq("id", id)
+          .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid)
+          .select()
+          .single();
+        if (error) throw error;
+        return this._fromRow(data);
+      },
+
+      async delete(id, sessionId, state = DEFAULT_STATE) {
+        const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
+        const { error } = await supabase
+          .from("notifications")
+          .delete()
+          .eq("id", id)
+          .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid);
+        if (error) throw error;
       },
     },
 
     Tweet: {
-      async list(sortKey = "-posted_at", limit = 50) {
+      _fromRow(row) {
+        const extra =
+          row?.extra && typeof row.extra === "object" && !Array.isArray(row.extra)
+            ? row.extra
+            : {};
+        const relatedBills =
+          Array.isArray(row?.related_bill_numbers) &&
+          row.related_bill_numbers.length > 0
+            ? row.related_bill_numbers
+            : extra.related_bills;
+        return {
+          ...row,
+          extra,
+          account_name: extra.account_name ?? row.author ?? "",
+          account_handle: extra.account_handle ?? row.author ?? "",
+          related_bills: Array.isArray(relatedBills)
+            ? relatedBills.map(normalizeBillNumber).filter(Boolean)
+            : [],
+          related_legiscan_ids:
+            Array.isArray(row?.related_legiscan_ids) &&
+            row.related_legiscan_ids.length > 0
+              ? row.related_legiscan_ids.map(String).filter(Boolean)
+              : Array.isArray(extra.related_legiscan_ids)
+                ? extra.related_legiscan_ids.map(String).filter(Boolean)
+                : [],
+          media_urls: Array.isArray(extra.media_urls) ? extra.media_urls : [],
+          engagement: extra.engagement ?? null,
+          tweet_url: extra.tweet_url ?? row.url ?? null,
+        };
+      },
+
+      async list(
+        sessionId,
+        sortKey = "-posted_at",
+        limit = 50,
+        state = DEFAULT_STATE,
+      ) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const { data, error } = await supabase
           .from("tweets")
           .select("*")
           .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid)
+          .order("posted_at", { ascending: false, nullsFirst: false })
           .limit(limit);
         if (error) throw error;
-        return sortByField(data ?? [], sortKey);
+        return sortByField(data ?? [], sortKey).map(this._fromRow);
       },
     },
 
     /** Personal bill metadata (flag + notes, per-user, separate from team). */
     UserBillMeta: {
       /** Fetch all personal metadata rows for the current user. Returns map keyed by bill_number. */
-      async getAll() {
+      async getAll(sessionId, state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const { data, error } = await supabase
           .from("user_bill_metadata")
           .select("bill_number, flag, bill_summary_notes, analysis")
-          .eq("user_id", userId);
+          .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid);
         if (error) throw error;
         const map = {};
         for (const row of data ?? []) {
@@ -486,16 +899,23 @@ export const api = {
       },
 
       /** Upsert metadata for a specific bill. */
-      async update(billNumber, fields) {
+      async update(sessionId, billNumber, fields, state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
+        const mutableFields = stripImmutableFields(
+          fields,
+          USER_BILL_META_IMMUTABLE_FIELDS,
+        );
         const { error } = await supabase.from("user_bill_metadata").upsert(
           {
             user_id: userId,
-            bill_number: billNumber,
-            ...fields,
+            state,
+            session_id: sid,
+            bill_number: normalizeBillNumber(billNumber),
+            ...mutableFields,
             updated_at: new Date().toISOString(),
           },
-          { onConflict: "user_id,bill_number" },
+          { onConflict: "user_id,state,session_id,bill_number" },
         );
         if (error) throw error;
       },
@@ -758,18 +1178,22 @@ export const api = {
         if (error) throw error;
       },
 
-      async getBillNumbers(teamId) {
+      async getBillNumbers(teamId, sessionId, state = DEFAULT_STATE) {
+        const sid = requireSessionId(sessionId);
         const { data, error } = await supabase
           .from("team_bills")
           .select("bill_number")
-          .eq("team_id", teamId);
+          .eq("team_id", teamId)
+          .eq("state", state)
+          .eq("session_id", sid);
         if (error) throw error;
         return (data ?? []).map((r) => r.bill_number);
       },
 
       /** Get all bill numbers from all teams the current user belongs to. */
-      async getAllTeamBillNumbers() {
+      async getAllTeamBillNumbers(sessionId, state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const { data: memberships } = await supabase
           .from("team_members")
           .select("team_id")
@@ -780,37 +1204,58 @@ export const api = {
         const { data, error } = await supabase
           .from("team_bills")
           .select("bill_number")
-          .in("team_id", teamIds);
+          .in("team_id", teamIds)
+          .eq("state", state)
+          .eq("session_id", sid);
         if (error) throw error;
         return [...new Set((data ?? []).map((r) => r.bill_number))];
       },
 
-      async addBill(teamId, billNumber) {
+      async addBill(teamId, bill, sessionId, state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
+        const billNumber = normalizeBillNumber(bill?.bill_number || bill);
+        if (!billNumber) throw new Error("A bill number is required.");
+        const legiscanId = bill?.legiscan_id
+          ? String(bill.legiscan_id)
+          : null;
         const { error } = await supabase
           .from("team_bills")
           .upsert(
-            { team_id: teamId, bill_number: billNumber, added_by: userId },
-            { onConflict: "team_id,bill_number" },
+            {
+              team_id: teamId,
+              bill_number: billNumber,
+              legiscan_id: legiscanId,
+              state,
+              session_id: sid,
+              added_by: userId,
+            },
+            { onConflict: "team_id,state,session_id,bill_number" },
           );
         if (error) throw error;
       },
 
-      async removeBill(teamId, billNumber) {
+      async removeBill(teamId, billNumber, sessionId, state = DEFAULT_STATE) {
+        const sid = requireSessionId(sessionId);
         const { error } = await supabase
           .from("team_bills")
           .delete()
           .eq("team_id", teamId)
-          .eq("bill_number", billNumber);
+          .eq("state", state)
+          .eq("session_id", sid)
+          .eq("bill_number", normalizeBillNumber(billNumber));
         if (error) throw error;
       },
 
       /** Fetch all team_bills rows with metadata (flag, policy_assistant, notes). */
-      async getBillMetadata(teamId) {
+      async getBillMetadata(teamId, sessionId, state = DEFAULT_STATE) {
+        const sid = requireSessionId(sessionId);
         const { data, error } = await supabase
           .from("team_bills")
           .select("bill_number, flag, policy_assistant, bill_summary_notes")
-          .eq("team_id", teamId);
+          .eq("team_id", teamId)
+          .eq("state", state)
+          .eq("session_id", sid);
         if (error) throw error;
         // Return a map keyed by bill_number for fast lookup.
         const map = {};
@@ -829,9 +1274,12 @@ export const api = {
        * Uses a SECURITY DEFINER RPC so the caller can read bill rows
        * belonging to other users, but only for bills tracked in their teams.
        */
-      async getSharedTeamBillData(billNumbers) {
+      async getSharedTeamBillData(billNumbers, sessionId, state = DEFAULT_STATE) {
         if (!billNumbers || billNumbers.length === 0) return [];
+        const sid = requireSessionId(sessionId);
         const { data, error } = await supabase.rpc("get_team_bills_data", {
+          p_state: state,
+          p_session_id: sid,
           p_bill_numbers: billNumbers,
         });
         if (error) throw error;
@@ -839,12 +1287,28 @@ export const api = {
       },
 
       /** Update metadata on a single team bill row. `fields` can contain flag, policy_assistant, bill_summary_notes. */
-      async updateBillMetadata(teamId, billNumber, fields) {
+      async updateBillMetadata(
+        teamId,
+        billNumber,
+        fields,
+        sessionId,
+        state = DEFAULT_STATE,
+      ) {
+        const sid = requireSessionId(sessionId);
+        const mutableFields = stripImmutableFields(
+          fields,
+          TEAM_BILL_IMMUTABLE_FIELDS,
+        );
+        if (Object.keys(mutableFields).length === 0) {
+          throw new Error("No mutable team-bill fields were provided.");
+        }
         const { error } = await supabase
           .from("team_bills")
-          .update(fields)
+          .update(mutableFields)
           .eq("team_id", teamId)
-          .eq("bill_number", billNumber);
+          .eq("state", state)
+          .eq("session_id", sid)
+          .eq("bill_number", normalizeBillNumber(billNumber));
         if (error) throw error;
       },
 
@@ -1111,12 +1575,15 @@ export const api = {
   // ─── Calendar Events ────────────────────────────────────────────────────────
   calendarEvents: {
     /** List events in a date range */
-    async list(startDate, endDate) {
+    async list(sessionId, startDate, endDate, state = DEFAULT_STATE) {
       const userId = await getUserId();
+      const sid = requireSessionId(sessionId);
       let query = supabase
         .from("calendar_events")
         .select("*")
         .eq("user_id", userId)
+        .eq("state", state)
+        .eq("session_id", sid)
         .order("start_time", { ascending: true });
 
       if (startDate) query = query.gte("start_time", startDate);
@@ -1128,11 +1595,21 @@ export const api = {
     },
 
     /** Create a new event */
-    async create(event) {
+    async create(event, sessionId, state = DEFAULT_STATE) {
       const userId = await getUserId();
+      const sid = requireSessionId(sessionId);
+      const mutableEvent = stripImmutableFields(
+        event,
+        CALENDAR_EVENT_IMMUTABLE_FIELDS,
+      );
       const { data, error } = await supabase
         .from("calendar_events")
-        .insert({ ...event, user_id: userId })
+        .insert({
+          ...mutableEvent,
+          user_id: userId,
+          state,
+          session_id: sid,
+        })
         .select()
         .single();
       if (error) throw error;
@@ -1140,13 +1617,23 @@ export const api = {
     },
 
     /** Update an existing event */
-    async update(id, patch) {
+    async update(id, patch, sessionId, state = DEFAULT_STATE) {
       const userId = await getUserId();
+      const sid = requireSessionId(sessionId);
+      const mutablePatch = stripImmutableFields(
+        patch,
+        CALENDAR_EVENT_IMMUTABLE_FIELDS,
+      );
+      if (Object.keys(mutablePatch).length === 0) {
+        throw new Error("No mutable calendar-event fields were provided.");
+      }
       const { data, error } = await supabase
         .from("calendar_events")
-        .update(patch)
+        .update(mutablePatch)
         .eq("id", id)
         .eq("user_id", userId)
+        .eq("state", state)
+        .eq("session_id", sid)
         .select()
         .single();
       if (error) throw error;
@@ -1154,13 +1641,16 @@ export const api = {
     },
 
     /** Delete an event */
-    async delete(id) {
+    async delete(id, sessionId, state = DEFAULT_STATE) {
       const userId = await getUserId();
+      const sid = requireSessionId(sessionId);
       const { error } = await supabase
         .from("calendar_events")
         .delete()
         .eq("id", id)
-        .eq("user_id", userId);
+        .eq("user_id", userId)
+        .eq("state", state)
+        .eq("session_id", sid);
       if (error) throw error;
     },
   },
@@ -1188,25 +1678,22 @@ export const api = {
      * the per-user ack table. `change_seen` is computed: true iff
      * the user has acked at or after the latest global change.
      */
-    async getAll() {
+    async getAll(sessionId, state = DEFAULT_STATE) {
       const userId = await getUserId();
+      const sid = requireSessionId(sessionId);
 
       // `bill_lc_history` is now global (every bill in the session is
       // tracked by the background job, ~5k+ rows). The UI only needs
       // LC state for bills THIS user follows (personal + team), so we
       // scope the read to that set — otherwise this poll would pull
       // the entire table every minute.
-      const [{ data: profileRow }, teamNumbers] = await Promise.all([
-        supabase
-          .from("profiles")
-          .select("tracked_bill_ids")
-          .eq("id", userId)
-          .maybeSingle(),
-        api.entities.Team.getAllTeamBillNumbers().catch(() => []),
+      const [personalNumbers, teamNumbers] = await Promise.all([
+        api.entities.TrackedBill.getNumbers(sid, state).catch(() => []),
+        api.entities.Team.getAllTeamBillNumbers(sid, state).catch(() => []),
       ]);
       const relevant = [
         ...new Set([
-          ...(profileRow?.tracked_bill_ids ?? []),
+          ...(personalNumbers ?? []),
           ...(teamNumbers ?? []),
         ]),
       ];
@@ -1216,6 +1703,8 @@ export const api = {
         const { data, error: histErr } = await supabase
           .from("bill_lc_history")
           .select("bill_number, current_lc, previous_lc, lc_changed_at")
+          .eq("state", state)
+          .eq("session_id", sid)
           .in("bill_number", relevant);
         if (histErr) throw histErr;
         histRows = data ?? [];
@@ -1226,7 +1715,9 @@ export const api = {
         .select(
           "bill_number, current_lc, previous_lc, lc_changed_at, change_seen, change_seen_at, last_checked",
         )
-        .eq("user_id", userId);
+        .eq("user_id", userId)
+        .eq("state", state)
+        .eq("session_id", sid);
       if (ackErr) throw ackErr;
 
       const ackMap = {};
@@ -1279,7 +1770,8 @@ export const api = {
      * display their LC number. Only two columns are selected and the
      * result is meant to be cached with a long staleTime.
      */
-    async getGlobalLcMap() {
+    async getGlobalLcMap(sessionId, state = DEFAULT_STATE) {
+      const sid = requireSessionId(sessionId);
       const PAGE_SIZE = 1000;
       const map = {};
       let from = 0;
@@ -1287,6 +1779,8 @@ export const api = {
         const { data, error } = await supabase
           .from("bill_lc_history")
           .select("bill_number, current_lc")
+          .eq("state", state)
+          .eq("session_id", sid)
           .not("current_lc", "is", null)
           .range(from, from + PAGE_SIZE - 1);
         if (error) throw error;
@@ -1304,7 +1798,8 @@ export const api = {
      * it's the bridge between a LegiScan bill and the legis.ga.gov version
      * detail endpoint. Returns the numeric id or null.
      */
-    async getLegislationId(billNumber) {
+    async getLegislationId(billNumber, sessionId, state = DEFAULT_STATE) {
+      const sid = requireSessionId(sessionId);
       const bn = String(billNumber || "")
         .replace(/\s+/g, "")
         .toUpperCase();
@@ -1312,6 +1807,8 @@ export const api = {
       const { data, error } = await supabase
         .from("bill_lc_history")
         .select("legislation_id")
+        .eq("state", state)
+        .eq("session_id", sid)
         .eq("bill_number", bn)
         .maybeSingle();
       if (error) throw error;
@@ -1324,8 +1821,9 @@ export const api = {
      * table (NOT the user's per-user row), so the first user to
      * sync wins and everyone else gets the notification.
      */
-    async _updateGlobalHistory(entries) {
+    async _updateGlobalHistory(entries, sessionId, state = DEFAULT_STATE) {
       if (!entries?.length) return [];
+      const sid = requireSessionId(sessionId);
       const now = new Date().toISOString();
       const billNumbers = entries
         .filter((e) => e.lc_number)
@@ -1335,6 +1833,8 @@ export const api = {
       const { data: existingRows, error: readErr } = await supabase
         .from("bill_lc_history")
         .select("bill_number, current_lc, previous_lc, lc_changed_at")
+        .eq("state", state)
+        .eq("session_id", sid)
         .in("bill_number", billNumbers);
       if (readErr) throw readErr;
 
@@ -1349,6 +1849,8 @@ export const api = {
         const oldLc = ex?.current_lc ?? null;
         const isChange = oldLc !== null && oldLc !== lc_number;
         upserts.push({
+          state,
+          session_id: sid,
           bill_number,
           current_lc: lc_number,
           previous_lc: isChange ? oldLc : (ex?.previous_lc ?? null),
@@ -1367,15 +1869,19 @@ export const api = {
 
       const { error: upErr } = await supabase
         .from("bill_lc_history")
-        .upsert(upserts, { onConflict: "bill_number" });
+        .upsert(upserts, { onConflict: "state,session_id,bill_number" });
       if (upErr) throw upErr;
       return changes;
     },
 
     /** Upsert LC tracking for a single bill. */
-    async upsert(billNumber, newLc) {
+    async upsert(billNumber, newLc, sessionId, state = DEFAULT_STATE) {
       if (!newLc) return;
-      await this.batchUpsert([{ bill_number: billNumber, lc_number: newLc }]);
+      await this.batchUpsert(
+        [{ bill_number: billNumber, lc_number: newLc }],
+        sessionId,
+        state,
+      );
     },
 
     /**
@@ -1385,16 +1891,19 @@ export const api = {
      * `change_seen_at`) is left untouched — it belongs to the user,
      * not the syncing event.
      */
-    async batchUpsert(entries) {
+    async batchUpsert(entries, sessionId, state = DEFAULT_STATE) {
       const userId = await getUserId();
+      const sid = requireSessionId(sessionId);
       const now = new Date().toISOString();
 
-      await this._updateGlobalHistory(entries);
+      await this._updateGlobalHistory(entries, sid, state);
 
       const trackingPayloads = entries
         .filter((e) => e.lc_number)
         .map(({ bill_number }) => ({
           user_id: userId,
+          state,
+          session_id: sid,
           bill_number,
           last_checked: now,
           updated_at: now,
@@ -1403,13 +1912,15 @@ export const api = {
 
       const { error } = await supabase
         .from("bill_lc_tracking")
-        .upsert(trackingPayloads, { onConflict: "user_id,bill_number" });
+        .upsert(trackingPayloads, {
+          onConflict: "user_id,state,session_id,bill_number",
+        });
       if (error) throw error;
     },
 
     /** Count of unseen LC changes for the current user. */
-    async getUnseenCount() {
-      const map = await this.getAll();
+    async getUnseenCount(sessionId, state = DEFAULT_STATE) {
+      const map = await this.getAll(sessionId, state);
       let n = 0;
       for (const t of Object.values(map)) {
         if (t.previous_lc && t.previous_lc !== t.current_lc && !t.change_seen) {
@@ -1420,8 +1931,8 @@ export const api = {
     },
 
     /** Mark all unseen changes as seen with timestamp. */
-    async markAllSeen() {
-      const map = await this.getAll();
+    async markAllSeen(sessionId, state = DEFAULT_STATE) {
+      const map = await this.getAll(sessionId, state);
       const unseen = Object.entries(map)
         .filter(
           ([, t]) =>
@@ -1429,16 +1940,19 @@ export const api = {
         )
         .map(([bn]) => bn);
       if (!unseen.length) return;
-      await this.markBillsSeen(unseen);
+      await this.markBillsSeen(unseen, sessionId, state);
     },
 
     /** Mark specific bills' LC changes as seen with timestamp. */
-    async markBillsSeen(billNumbers) {
+    async markBillsSeen(billNumbers, sessionId, state = DEFAULT_STATE) {
       if (!billNumbers?.length) return;
       const userId = await getUserId();
+      const sid = requireSessionId(sessionId);
       const now = new Date().toISOString();
       const payloads = billNumbers.map((bn) => ({
         user_id: userId,
+        state,
+        session_id: sid,
         bill_number: bn,
         change_seen: true,
         change_seen_at: now,
@@ -1446,7 +1960,9 @@ export const api = {
       }));
       const { error } = await supabase
         .from("bill_lc_tracking")
-        .upsert(payloads, { onConflict: "user_id,bill_number" });
+        .upsert(payloads, {
+          onConflict: "user_id,state,session_id,bill_number",
+        });
       if (error) throw error;
     },
   },
@@ -1457,31 +1973,40 @@ export const api = {
   meetingIntel: {
     transcripts: {
       /** List all transcripts, newest first. */
-      async list(limit = 200) {
+      async list(sessionId, limit = 200, state = DEFAULT_STATE) {
+        const sid = requireSessionId(sessionId);
         const { data, error } = await supabase
           .from("meeting_transcripts")
           .select("*")
+          .eq("state", state)
+          .eq("session_id", sid)
           .order("start_time", { ascending: false })
           .limit(limit);
         if (error) throw error;
         return data ?? [];
       },
 
-      async getByMeetingId(meetingId) {
+      async getByMeetingId(meetingId, sessionId, state = DEFAULT_STATE) {
         if (!meetingId) return null;
+        const sid = requireSessionId(sessionId);
         const { data, error } = await supabase
           .from("meeting_transcripts")
           .select("*")
+          .eq("state", state)
+          .eq("session_id", sid)
           .eq("meeting_id", meetingId)
           .maybeSingle();
         if (error) throw error;
         return data ?? null;
       },
 
-      async get(id) {
+      async get(id, sessionId, state = DEFAULT_STATE) {
+        const sid = requireSessionId(sessionId);
         const { data, error } = await supabase
           .from("meeting_transcripts")
           .select("*")
+          .eq("state", state)
+          .eq("session_id", sid)
           .eq("id", id)
           .maybeSingle();
         if (error) throw error;
@@ -1492,27 +2017,39 @@ export const api = {
        * Create (or fetch existing) the transcript row for a meeting.
        * `meeting` is a normalized legis-ga meeting object.
        */
-      async ensureForMeeting(meeting, fields = {}) {
+      async ensureForMeeting(
+        meeting,
+        fields = {},
+        sessionId,
+        state = DEFAULT_STATE,
+      ) {
         const userId = await getUserId();
-        const existing = await this.getByMeetingId(meeting.id);
+        const sid = requireSessionId(sessionId);
+        const existing = await this.getByMeetingId(meeting.id, sid, state);
+        const mutableFields = stripImmutableFields(
+          fields,
+          TRANSCRIPT_IMMUTABLE_FIELDS,
+        );
         if (existing) {
           // Apply any new fields (e.g. freshly-parsed agenda bills).
-          if (Object.keys(fields).length > 0) {
-            return this.update(existing.id, fields);
+          if (Object.keys(mutableFields).length > 0) {
+            return this.update(existing.id, mutableFields, sid, state);
           }
           return existing;
         }
         const payload = {
+          state,
+          session_id: sid,
           meeting_id: meeting.id,
           title: meeting.title ?? "Legislative Meeting",
           chamber: meeting.chamber ?? null,
           committee: meeting.committee ?? meeting.title ?? null,
           start_time: meeting.start_time ?? null,
-          status: fields.status ?? "scheduled",
+          status: mutableFields.status ?? "scheduled",
           video_url: meeting.videoUrl ?? null,
           agenda_url: meeting.agendaUrl ?? null,
           created_by: userId,
-          ...fields,
+          ...mutableFields,
         };
         const { data, error } = await supabase
           .from("meeting_transcripts")
@@ -1523,10 +2060,20 @@ export const api = {
         return data;
       },
 
-      async update(id, patch) {
+      async update(id, patch, sessionId, state = DEFAULT_STATE) {
+        const sid = requireSessionId(sessionId);
+        const mutablePatch = stripImmutableFields(
+          patch,
+          TRANSCRIPT_IMMUTABLE_FIELDS,
+        );
+        if (Object.keys(mutablePatch).length === 0) {
+          throw new Error("No mutable transcript fields were provided.");
+        }
         const { data, error } = await supabase
           .from("meeting_transcripts")
-          .update(patch)
+          .update(mutablePatch)
+          .eq("state", state)
+          .eq("session_id", sid)
           .eq("id", id)
           .select()
           .single();
@@ -1538,12 +2085,22 @@ export const api = {
        * Request unattended live monitoring of a meeting from a YouTube live URL.
        * Sets youtube_url + status='requested'; the worker polls and claims it.
        */
-      async requestMonitor(meeting, youtubeUrl) {
-        const t = await this.ensureForMeeting(meeting);
-        return this.update(t.id, {
-          youtube_url: youtubeUrl,
-          status: "requested",
-        });
+      async requestMonitor(
+        meeting,
+        youtubeUrl,
+        sessionId,
+        state = DEFAULT_STATE,
+      ) {
+        const t = await this.ensureForMeeting(meeting, {}, sessionId, state);
+        return this.update(
+          t.id,
+          {
+            youtube_url: youtubeUrl,
+            status: "requested",
+          },
+          sessionId,
+          state,
+        );
       },
     },
 
@@ -1619,12 +2176,15 @@ export const api = {
     },
 
     alerts: {
-      async list(limit = 100) {
+      async list(sessionId, limit = 100, state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const { data, error } = await supabase
           .from("meeting_alerts")
           .select("*")
           .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid)
           .order("created_at", { ascending: false })
           .limit(limit);
         if (error) throw error;
@@ -1635,11 +2195,14 @@ export const api = {
        * Create alerts for the current user, de-duplicated against existing
        * alerts of the same (transcript_id, bill_number, alert_type).
        */
-      async createMany(rows) {
+      async createMany(rows, sessionId, state = DEFAULT_STATE) {
         if (!rows?.length) return [];
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const payloads = rows.map((r) => ({
           user_id: userId,
+          state,
+          session_id: sid,
           transcript_id: r.transcript_id ?? null,
           bill_number: r.bill_number,
           alert_type: r.alert_type ?? "mentioned",
@@ -1650,6 +2213,8 @@ export const api = {
           .from("meeting_alerts")
           .select("transcript_id, bill_number, alert_type")
           .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid)
           .in(
             "bill_number",
             [...new Set(payloads.map((p) => p.bill_number))],
@@ -1674,23 +2239,29 @@ export const api = {
         return data ?? [];
       },
 
-      async markSeen(ids) {
+      async markSeen(ids, sessionId, state = DEFAULT_STATE) {
         if (!ids?.length) return;
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const { error } = await supabase
           .from("meeting_alerts")
           .update({ seen: true })
           .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid)
           .in("id", ids);
         if (error) throw error;
       },
 
-      async getUnseenCount() {
+      async getUnseenCount(sessionId, state = DEFAULT_STATE) {
         const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
         const { count, error } = await supabase
           .from("meeting_alerts")
           .select("id", { count: "exact", head: true })
           .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid)
           .eq("seen", false);
         if (error) throw error;
         return count ?? 0;
@@ -1712,10 +2283,13 @@ export const api = {
     },
 
     /** Fetch persisted legislative events within a date range. */
-    async list(startDate, endDate) {
+    async list(startDate, endDate, sessionId, state = DEFAULT_STATE) {
+      const sid = requireSessionId(sessionId);
       const { data, error } = await supabase
         .from("legislative_events")
         .select("*")
+        .eq("state", state)
+        .eq("session_id", sid)
         .gte("start_time", startDate)
         .lte("start_time", endDate)
         .order("start_time", { ascending: true });
@@ -1728,11 +2302,19 @@ export const api = {
      * Uses the Open States event ID as the conflict key so rescheduled
      * meetings overwrite their old start_time rather than duplicating.
      */
-    async upsert(normalizedEvents) {
+    async upsert(
+      normalizedEvents,
+      sessionId,
+      state = DEFAULT_STATE,
+    ) {
       if (!normalizedEvents?.length) return;
+      const sid = requireSessionId(sessionId);
       const now = new Date().toISOString();
       const rows = normalizedEvents.map((ev) => ({
-        id: ev.id,
+        id: `${state}:${sid}:${ev.id}`,
+        source_id: ev.id,
+        state,
+        session_id: sid,
         title: ev.title,
         description: ev.description || null,
         start_time: this._toTimestamp(ev.start_time),

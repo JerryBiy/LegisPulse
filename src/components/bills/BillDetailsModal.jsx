@@ -143,17 +143,17 @@ export default function BillDetailsModal({
   isTracked,
   onToggleTracking,
   onBillUpdate,
-  isInTeam,
-  onAddToTeam,
-  teamMeta,
-  onTeamMetaChange,
-  teamMembers,
-  personalMeta,
-  onPersonalMetaChange,
-  teams,
-  teamBillMap,
-  onToggleTeamBill,
-  lcTracking,
+  isInTeam = false,
+  onAddToTeam = null,
+  teamMeta = null,
+  onTeamMetaChange = null,
+  teamMembers = [],
+  personalMeta = null,
+  onPersonalMetaChange = null,
+  teams = [],
+  teamBillMap = {},
+  onToggleTeamBill = null,
+  lcTracking = null,
 }) {
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [generatedSummary, setGeneratedSummary] = useState(null);
@@ -240,12 +240,17 @@ export default function BillDetailsModal({
               }
 
               try {
-                const updatedBill = await api.entities.Bill.update(bill.id, {
-                  pdf_url: link,
-                  sponsor: primarySponsor,
-                  sponsors: sponsorNames,
-                  co_sponsors: coSponsors,
-                });
+                const updatedBill = await api.entities.Bill.update(
+                  bill.id,
+                  {
+                    pdf_url: link,
+                    sponsor: primarySponsor,
+                    sponsors: sponsorNames,
+                    co_sponsors: coSponsors,
+                  },
+                  bill.session_id,
+                  bill.state || "GA",
+                );
 
                 if (onBillUpdate && updatedBill) {
                   onBillUpdate(updatedBill);
@@ -420,10 +425,15 @@ export default function BillDetailsModal({
         const summaryText = normalizedSummary.short_summary;
         const changesText = normalizedSummary.what_does_this_do;
 
-        const updatedBill = await api.entities.Bill.update(bill.id, {
-          summary: summaryText,
-          changes_analysis: changesText,
-        });
+        const updatedBill = await api.entities.Bill.update(
+          bill.id,
+          {
+            summary: summaryText,
+            changes_analysis: changesText,
+          },
+          bill.session_id,
+          bill.state || "GA",
+        );
 
         if (onBillUpdate && updatedBill) {
           onBillUpdate(updatedBill);

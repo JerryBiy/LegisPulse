@@ -10,6 +10,10 @@ import BillDetailsModal from "../components/bills/BillDetailsModal";
 import BillSyncButton from "../components/bills/BillSyncButton";
 import { useToast } from "@/components/ui/use-toast";
 import { supabase } from "@/lib/supabase";
+import {
+  getSessionDisplayName,
+  useLegislativeSession,
+} from "@/lib/LegislativeSessionContext";
 
 export default function Dashboard() {
   const queryClient = useQueryClient();
@@ -23,22 +27,27 @@ export default function Dashboard() {
     chamber: null,
     bill_type: null,
     status: null,
-    session_year: null,
   });
   const [selectedBill, setSelectedBill] = useState(null);
   const { user: authUser } = useAuth();
+  const {
+    state,
+    selectedSession,
+    selectedSessionId,
+    isReady,
+  } = useLegislativeSession();
 
   const { data: rawBills = [], isLoading } = useQuery({
-    queryKey: ["bills"],
-    queryFn: () => api.entities.Bill.list(),
+    queryKey: ["bills", state, selectedSessionId],
+    queryFn: () => api.entities.Bill.list(selectedSessionId, undefined, state),
+    enabled: isReady,
   });
 
-  const { data: userData } = useQuery({
-    queryKey: ["profile"],
-    queryFn: () => api.auth.me().catch(() => null),
+  const { data: trackedBillIds = [] } = useQuery({
+    queryKey: ["trackedBills", state, selectedSessionId],
+    queryFn: () => api.entities.TrackedBill.getNumbers(selectedSessionId, state),
+    enabled: isReady,
   });
-
-  const trackedBillIds = userData?.tracked_bill_ids ?? [];
 
   // ── Team ────────────────────────────────────────────────────────────────────
   const { data: allTeamData } = useQuery({
@@ -55,16 +64,18 @@ export default function Dashboard() {
 
   // ── LC Tracking data ────────────────────────────────────────────────────────
   const { data: lcTrackingMap = {} } = useQuery({
-    queryKey: ["lcTracking"],
-    queryFn: () => api.LcTracking.getAll(),
+    queryKey: ["lcTracking", state, selectedSessionId],
+    queryFn: () => api.LcTracking.getAll(selectedSessionId, state),
+    enabled: isReady,
   });
 
   // Session-wide LC lookup (every bill, not just tracked) so untracked
   // dashboard cards can still show their LC number. Cached for a while
   // since the background job only updates it hourly.
   const { data: globalLcMap = {} } = useQuery({
-    queryKey: ["lcGlobalMap"],
-    queryFn: () => api.LcTracking.getGlobalLcMap(),
+    queryKey: ["lcGlobalMap", state, selectedSessionId],
+    queryFn: () => api.LcTracking.getGlobalLcMap(selectedSessionId, state),
+    enabled: isReady,
     staleTime: 10 * 60 * 1000,
   });
 
@@ -80,30 +91,35 @@ export default function Dashboard() {
     [lcTrackingMap, globalLcMap],
   );
 
-  // Fetch bill numbers for every team in parallel
-  const teamBillQueries = allTeams.map((t) => ({
-    queryKey: ["teamBills", t.id],
-    queryFn: () => api.entities.Team.getBillNumbers(t.id),
-    enabled: !!t.id,
-  }));
-
   // Use individual useQuery for each team's bills
   const { data: teamBillMap = {} } = useQuery({
-    queryKey: ["allTeamBills", allTeams.map((t) => t.id).join(",")],
+    queryKey: [
+      "allTeamBills",
+      state,
+      selectedSessionId,
+      allTeams.map((t) => t.id).join(","),
+    ],
     queryFn: async () => {
       // Always fetch from DB — never use manual cache shortcut.
       // An empty cached array is truthy, so `if (cached)` would silently
       // return stale data and teammates would miss pre-existing bills.
       const entries = await Promise.all(
         allTeams.map(async (t) => {
-          const nums = await api.entities.Team.getBillNumbers(t.id);
-          queryClient.setQueryData(["teamBills", t.id], nums);
+          const nums = await api.entities.Team.getBillNumbers(
+            t.id,
+            selectedSessionId,
+            state,
+          );
+          queryClient.setQueryData(
+            ["teamBills", t.id, state, selectedSessionId],
+            nums,
+          );
           return [t.id, nums];
         }),
       );
       return Object.fromEntries(entries);
     },
-    enabled: allTeams.length > 0,
+    enabled: isReady && allTeams.length > 0,
     staleTime: 0,
     refetchInterval: 15000,
     refetchOnWindowFocus: true,
@@ -124,7 +140,9 @@ export default function Dashboard() {
             filter: `team_id=eq.${team.id}`,
           },
           () => {
-            queryClient.invalidateQueries({ queryKey: ["teamBills", team.id] });
+            queryClient.invalidateQueries({
+              queryKey: ["teamBills", team.id, state, selectedSessionId],
+            });
             queryClient.invalidateQueries({ queryKey: ["allTeamBills"] });
             queryClient.invalidateQueries({ queryKey: ["allTeamBillNumbers"] });
             queryClient.invalidateQueries({ queryKey: ["sharedTeamBillData"] });
@@ -138,47 +156,61 @@ export default function Dashboard() {
         supabase.removeChannel(channel);
       });
     };
-  }, [allTeams, queryClient]);
+  }, [allTeams, queryClient, selectedSessionId, state]);
 
   const teamBillMutation = useMutation({
-    mutationFn: ({ teamId, action, billNumber }) =>
+    mutationFn: ({
+      teamId,
+      action,
+      billNumber,
+      bill,
+      sessionId,
+      scopeState,
+    }) =>
       action === "add"
-        ? api.entities.Team.addBill(teamId, billNumber)
-        : api.entities.Team.removeBill(teamId, billNumber),
-    onMutate: async ({ teamId, action, billNumber }) => {
-      await queryClient.cancelQueries({ queryKey: ["teamBills", teamId] });
-      const prev = queryClient.getQueryData(["teamBills", teamId]);
-      queryClient.setQueryData(["teamBills", teamId], (old) =>
+        ? api.entities.Team.addBill(teamId, bill, sessionId, scopeState)
+        : api.entities.Team.removeBill(
+            teamId,
+            billNumber,
+            sessionId,
+            scopeState,
+          ),
+    onMutate: async ({ teamId, action, billNumber, teamKey, combinedKey }) => {
+      await queryClient.cancelQueries({ queryKey: teamKey });
+      await queryClient.cancelQueries({ queryKey: combinedKey });
+      const prev = queryClient.getQueryData(teamKey);
+      const prevCombined = queryClient.getQueryData(combinedKey);
+      queryClient.setQueryData(teamKey, (old) =>
         action === "add"
           ? [...(old ?? []), billNumber]
           : (old ?? []).filter((n) => n !== billNumber),
       );
       // Also optimistically update the combined map
-      queryClient.setQueryData(
-        ["allTeamBills", allTeams.map((t) => t.id).join(",")],
-        (old) => {
-          if (!old) return old;
-          const teamNums = old[teamId] ?? [];
-          return {
-            ...old,
-            [teamId]:
-              action === "add"
-                ? [...teamNums, billNumber]
-                : teamNums.filter((n) => n !== billNumber),
-          };
-        },
-      );
-      return { prev, teamId };
+      queryClient.setQueryData(combinedKey, (old) => {
+        if (!old) return old;
+        const teamNums = old[teamId] ?? [];
+        return {
+          ...old,
+          [teamId]:
+            action === "add"
+              ? [...teamNums, billNumber]
+              : teamNums.filter((n) => n !== billNumber),
+        };
+      });
+      return { combinedKey, prev, prevCombined, teamKey };
     },
     onError: (_e, _v, ctx) => {
-      if (ctx?.teamId) {
-        queryClient.setQueryData(["teamBills", ctx.teamId], ctx.prev);
+      if (ctx?.teamKey) {
+        queryClient.setQueryData(ctx.teamKey, ctx.prev);
+        queryClient.setQueryData(ctx.combinedKey, ctx.prevCombined);
       }
     },
-    onSettled: (_d, _e, { teamId }) => {
-      queryClient.invalidateQueries({ queryKey: ["teamBills", teamId] });
+    onSettled: (_d, _e, { teamKey, combinedKey }) => {
       queryClient.invalidateQueries({
-        queryKey: ["allTeamBills"],
+        queryKey: teamKey,
+      });
+      queryClient.invalidateQueries({
+        queryKey: combinedKey,
       });
       queryClient.invalidateQueries({ queryKey: ["allTeamBillNumbers"] });
     },
@@ -187,10 +219,26 @@ export default function Dashboard() {
   const handleToggleTeamBill = (teamId, billNumber) => {
     const currentNums = teamBillMap[teamId] ?? [];
     const isCurrentlyInTeam = currentNums.includes(billNumber);
+    const sessionId = selectedSessionId;
+    const scopeState = state;
+    const teamKey = ["teamBills", teamId, scopeState, sessionId];
+    const combinedKey = [
+      "allTeamBills",
+      scopeState,
+      sessionId,
+      allTeams.map((team) => team.id).join(","),
+    ];
     teamBillMutation.mutate({
       teamId,
       action: isCurrentlyInTeam ? "remove" : "add",
       billNumber,
+      bill:
+        rawBills.find((candidate) => candidate.bill_number === billNumber) ||
+        billNumber,
+      combinedKey,
+      scopeState,
+      sessionId,
+      teamKey,
     });
     const team = allTeams.find((t) => t.id === teamId);
     toast({
@@ -201,18 +249,34 @@ export default function Dashboard() {
   };
 
   const trackMutation = useMutation({
-    mutationFn: (newIds) => api.auth.updateMe({ tracked_bill_ids: newIds }),
-    onMutate: async (newIds) => {
-      await queryClient.cancelQueries({ queryKey: ["profile"] });
-      const previous = queryClient.getQueryData(["profile"]);
-      queryClient.setQueryData(["profile"], (old) =>
-        old ? { ...old, tracked_bill_ids: newIds } : old,
+    mutationFn: ({ action, bill, sessionId, scopeState }) =>
+      action === "add"
+        ? api.entities.TrackedBill.add(sessionId, bill, scopeState)
+        : api.entities.TrackedBill.remove(
+            sessionId,
+            bill.bill_number,
+            scopeState,
+          ),
+    onMutate: async ({ action, bill, trackedKey }) => {
+      const key = trackedKey;
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData(key);
+      queryClient.setQueryData(key, (old = []) =>
+        action === "add"
+          ? [...new Set([...old, bill.bill_number])]
+          : old.filter((number) => number !== bill.bill_number),
       );
-      return { previous };
+      return { previous, key };
     },
-    onError: (_err, _newIds, context) => {
-      queryClient.setQueryData(["profile"], context.previous);
+    onError: (_err, _variables, context) => {
+      if (context?.key) {
+        queryClient.setQueryData(context.key, context.previous);
+      }
     },
+    onSettled: (_data, _error, { trackedKey }) =>
+      queryClient.invalidateQueries({
+        queryKey: trackedKey,
+      }),
   });
 
   const fixBillTypes = (bills) => {
@@ -346,12 +410,6 @@ export default function Dashboard() {
       filtered = filtered.filter((bill) => bill.status === filters.status);
     }
 
-    if (filters.session_year) {
-      filtered = filtered.filter(
-        (bill) => bill.session_year === filters.session_year,
-      );
-    }
-
     return filtered;
   }, [bills, filters]);
 
@@ -419,21 +477,39 @@ export default function Dashboard() {
 
   const handleToggleTracking = async (billId, billNumber) => {
     if (!authUser) return;
+    const bill = rawBills.find((item) => item.id === billId) || {
+      id: billId,
+      bill_number: billNumber,
+    };
     const isCurrentlyTracked = trackedBillIds.includes(billNumber);
-    const newTrackedIds = isCurrentlyTracked
-      ? trackedBillIds.filter((id) => id !== billNumber)
-      : [...trackedBillIds, billNumber];
-    trackMutation.mutate(newTrackedIds);
+    const sessionId = selectedSessionId;
+    const scopeState = state;
+    trackMutation.mutate({
+      action: isCurrentlyTracked ? "remove" : "add",
+      bill,
+      scopeState,
+      sessionId,
+      trackedKey: ["trackedBills", scopeState, sessionId],
+    });
     if (!isCurrentlyTracked) {
-      monitorBillOnTwitter(billNumber);
+      monitorBillOnTwitter(bill);
     }
   };
 
-  const monitorBillOnTwitter = async (billNumber) => {
+  const monitorBillOnTwitter = async (bill) => {
+    const billNumber = bill.bill_number;
     try {
       // Search for recent tweets mentioning the bill
       await api.integrations.Core.InvokeLLM({
-        prompt: `Search Twitter/X for recent posts from @GeorgiaHouseofReps and @Georgia_Senate that mention "${billNumber}". 
+        prompt: `Search Twitter/X for recent posts from @GeorgiaHouseofReps and @Georgia_Senate about this exact bill:
+        State: ${state}
+        Session: ${getSessionDisplayName(selectedSession)} (LegiScan session_id ${selectedSessionId})
+        Bill: ${billNumber}
+        Title: ${bill.title || "Untitled"}
+        LegiScan bill_id: ${bill.legiscan_id || "unknown"}
+        Source URL: ${bill.state_link || bill.url || "not provided"}
+
+        Do not return posts about a same-numbered bill from any other session.
         Look for any updates, votes, committee actions, or status changes related to this bill.
         Return the most relevant information about recent activity.`,
         add_context_from_internet: true,
@@ -457,14 +533,18 @@ export default function Dashboard() {
       }).then(async (response) => {
         if (response.has_updates && response.updates?.length > 0) {
           // Create notification for user
-          await api.entities.Notification.create({
-            user_id: authUser?.id,
-            notification_type: "bill_mention",
-            title: `${billNumber} mentioned on Twitter`,
-            message: response.updates[0].content,
-            related_bill_id: billNumber,
-            priority: "high",
-          });
+          await api.entities.Notification.create(
+            {
+              notification_type: "bill_mention",
+              title: `${billNumber} mentioned on Twitter`,
+              message: response.updates[0].content,
+              related_bill_id: billNumber,
+              legiscan_id: bill.legiscan_id,
+              priority: "high",
+            },
+            selectedSessionId,
+            state,
+          );
         }
       });
     } catch (error) {
@@ -475,7 +555,7 @@ export default function Dashboard() {
   const handleBillUpdate = useCallback(
     (updatedBill) => {
       if (!updatedBill?.id) return;
-      queryClient.setQueryData(["bills"], (old) =>
+      queryClient.setQueryData(["bills", state, selectedSessionId], (old) =>
         old ? old.map((b) => (b.id === updatedBill.id ? updatedBill : b)) : old,
       );
       setSelectedBill((prev) => {
@@ -483,8 +563,13 @@ export default function Dashboard() {
         return { ...prev, ...updatedBill };
       });
     },
-    [queryClient],
+    [queryClient, selectedSessionId, state],
   );
+
+  useEffect(() => {
+    setSelectedBill(null);
+    setDisplayCount(10);
+  }, [selectedSessionId]);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -497,11 +582,10 @@ export default function Dashboard() {
             </h1>
             <p className="text-slate-600 mt-1 flex items-center gap-2">
               <Globe className="w-4 h-4" />
-              Live bills from legis.ga.gov - 2025-2026 session
+              Bills from LegiScan - {getSessionDisplayName(selectedSession)}
             </p>
           </div>
           <BillSyncButton
-            autoSync={!isLoading && rawBills.length === 0}
             onSyncComplete={() => {
               queryClient.invalidateQueries({ queryKey: ["bills"] });
               queryClient.invalidateQueries({ queryKey: ["teamBills"] });

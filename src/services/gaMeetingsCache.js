@@ -19,19 +19,22 @@ const TABLE = "ga_meetings_cache";
  * we want to keep cached. The GA convenes on the second Monday of
  * January, so Jan 1 of the current year is a safe lower bound.
  */
-export function getSessionStartDate() {
-  return new Date(new Date().getFullYear(), 0, 1);
+export function getSessionStartDate(session) {
+  const year = Number(session?.year_start) || new Date().getFullYear();
+  return new Date(year, 0, 1);
 }
 
 // ─── Row <-> normalized meeting conversion ───────────────────
 
-function meetingToRow(m) {
+function meetingToRow(m, sessionId, state = "GA") {
   const legisId =
     typeof m.id === "string"
       ? Number(String(m.id).replace(/^legis-/, ""))
       : m.id;
   return {
-    id: m.id,
+    id: `${state}:${sessionId}:${m.id}`,
+    state,
+    session_id: Number(sessionId),
     legis_id: Number.isFinite(legisId) ? legisId : null,
     title: m.title ?? "Legislative Event",
     description: m.description || null,
@@ -86,11 +89,19 @@ function rowToMeeting(r) {
 /**
  * Read cached meetings whose start_time falls in [startIso, endIso].
  */
-export async function fetchCachedMeetings(startIso, endIso) {
-  if (!startIso || !endIso) return [];
+export async function fetchCachedMeetings(
+  startIso,
+  endIso,
+  sessionId,
+  state = "GA",
+  providerSessionId = null,
+) {
+  if (!startIso || !endIso || !sessionId || !providerSessionId) return [];
   const { data, error } = await supabase
     .from(TABLE)
     .select("*")
+    .eq("state", state)
+    .eq("session_id", Number(sessionId))
     .gte("start_time", startIso)
     .lte("start_time", endIso)
     .order("start_time", { ascending: true });
@@ -98,20 +109,27 @@ export async function fetchCachedMeetings(startIso, endIso) {
     console.warn("Cached meetings fetch failed:", error.message);
     return [];
   }
-  return (data ?? []).map(rowToMeeting);
+  return (data ?? [])
+    .filter(
+      (row) =>
+        Number(row?.data?.provider_session_id) === Number(providerSessionId),
+    )
+    .map(rowToMeeting);
 }
 
 /**
  * Upsert a batch of normalized meetings into the cache.
  * Existing rows are overwritten (so reschedules apply in-place).
  */
-export async function upsertMeetings(meetings) {
-  if (!meetings?.length) return;
-  const rows = meetings.map(meetingToRow);
+export async function upsertMeetings(meetings, sessionId, state = "GA") {
+  if (!meetings?.length || !sessionId) return;
+  const rows = meetings.map((meeting) =>
+    meetingToRow(meeting, sessionId, state),
+  );
   const { error } = await supabase
     .from(TABLE)
     .upsert(rows, { onConflict: "id" });
-  if (error) console.warn("Meeting upsert failed:", error.message);
+  if (error) throw new Error(`Meeting upsert failed: ${error.message}`);
 }
 
 /**
@@ -121,7 +139,14 @@ export async function upsertMeetings(meetings) {
  *
  * Returns the union of all fetched (and upserted) meetings.
  */
-export async function syncMeetingsRange(startDate, endDate) {
+export async function syncMeetingsRange(
+  startDate,
+  endDate,
+  sessionId,
+  state = "GA",
+  providerSessionId = null,
+) {
+  if (!sessionId || !providerSessionId) return [];
   const start = new Date(startDate);
   const end = new Date(endDate);
   if (!(start < end)) return [];
@@ -133,12 +158,15 @@ export async function syncMeetingsRange(startDate, endDate) {
     chunkEnd.setDate(chunkEnd.getDate() + 30);
     if (chunkEnd > end) chunkEnd.setTime(end.getTime());
 
-    const chunk = await fetchGAMeetings(cur, chunkEnd);
+    const chunk = await fetchGAMeetings(
+      cur,
+      chunkEnd,
+      null,
+      providerSessionId,
+    );
     if (chunk.length) {
       all.push(...chunk);
-      // Fire-and-forget upsert (don't block the next chunk on the
-      // DB round-trip).
-      upsertMeetings(chunk);
+      await upsertMeetings(chunk, sessionId, state);
     }
     cur = new Date(chunkEnd.getTime() + 24 * 60 * 60 * 1000);
   }

@@ -1,6 +1,12 @@
-import React, { useState, useEffect } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { api } from "@/api/apiClient";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,54 +18,77 @@ import {
   AlertCircle,
   RefreshCw,
 } from "lucide-react";
-import { format, formatDistanceToNow } from "date-fns";
+import { formatDistanceToNow } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
 
 export default function TwitterFeed({
+  state = "GA",
+  sessionId,
   trackedBillNumbers = [],
+  trackedLegiscanIds = [],
   showAllTweets = false,
 }) {
   const [tweets, setTweets] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [filteredTweets, setFilteredTweets] = useState([]);
+  const requestIdRef = useRef(0);
 
-  useEffect(() => {
-    loadTweets();
-  }, []);
-
-  useEffect(() => {
-    filterTweets();
-  }, [tweets, trackedBillNumbers, showAllTweets]);
-
-  const loadTweets = async () => {
+  const loadTweets = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    if (!sessionId) {
+      setTweets([]);
+      setIsLoading(false);
+      return;
+    }
     setIsLoading(true);
     try {
-      const tweetsData = await api.entities.Tweet.list("-posted_at", 50);
+      const tweetsData = await api.entities.Tweet.list(
+        sessionId,
+        "-posted_at",
+        50,
+        state,
+      );
+      if (requestId !== requestIdRef.current) return;
       setTweets(tweetsData);
     } catch (error) {
+      if (requestId !== requestIdRef.current) return;
       console.error("Error loading tweets:", error);
     }
-    setIsLoading(false);
-  };
+    if (requestId === requestIdRef.current) setIsLoading(false);
+  }, [sessionId, state]);
 
-  const filterTweets = () => {
-    if (showAllTweets) {
-      setFilteredTweets(tweets);
-      return;
-    }
+  useEffect(() => {
+    setTweets([]);
+    loadTweets();
+    return () => {
+      requestIdRef.current += 1;
+    };
+  }, [loadTweets]);
 
-    if (trackedBillNumbers.length === 0) {
-      setFilteredTweets([]);
-      return;
-    }
-
-    const filtered = tweets.filter((tweet) =>
-      tweet.related_bills?.some((billNum) =>
-        trackedBillNumbers.includes(billNum),
+  const filteredTweets = useMemo(() => {
+    if (showAllTweets) return tweets;
+    const numberSet = new Set(
+      trackedBillNumbers.map((number) =>
+        String(number || "")
+          .toUpperCase()
+          .replace(/\s+/g, ""),
       ),
     );
-    setFilteredTweets(filtered);
-  };
+    const legiscanIdSet = new Set(trackedLegiscanIds.map(String));
+    if (numberSet.size === 0 && legiscanIdSet.size === 0) return [];
+    return tweets.filter((tweet) => {
+      const numberMatch = tweet.related_bills?.some((billNumber) =>
+        numberSet.has(
+          String(billNumber || "")
+            .toUpperCase()
+            .replace(/\s+/g, ""),
+        ),
+      );
+      const idMatch = tweet.related_legiscan_ids?.some((id) =>
+        legiscanIdSet.has(String(id)),
+      );
+      return numberMatch || idMatch;
+    });
+  }, [showAllTweets, trackedBillNumbers, trackedLegiscanIds, tweets]);
 
   const getBillBadgeColor = (billNumber) => {
     if (billNumber.startsWith("HB")) {
@@ -111,20 +140,22 @@ export default function TwitterFeed({
         </Button>
       </div>
 
-      {!showAllTweets && trackedBillNumbers.length === 0 && (
-        <Card className="border-dashed">
-          <CardContent className="p-8 text-center">
-            <AlertCircle className="w-12 h-12 text-slate-400 mx-auto mb-3" />
-            <h4 className="font-semibold text-slate-900 mb-2">
-              No Tracked Bills
-            </h4>
-            <p className="text-sm text-slate-600">
-              Start tracking bills to see Twitter mentions from official GA
-              Legislature accounts
-            </p>
-          </CardContent>
-        </Card>
-      )}
+      {!showAllTweets &&
+        trackedBillNumbers.length === 0 &&
+        trackedLegiscanIds.length === 0 && (
+          <Card className="border-dashed">
+            <CardContent className="p-8 text-center">
+              <AlertCircle className="w-12 h-12 text-slate-400 mx-auto mb-3" />
+              <h4 className="font-semibold text-slate-900 mb-2">
+                No Tracked Bills
+              </h4>
+              <p className="text-sm text-slate-600">
+                Start tracking bills to see Twitter mentions from official GA
+                Legislature accounts
+              </p>
+            </CardContent>
+          </Card>
+        )}
 
       {isLoading ? (
         <div className="space-y-4">

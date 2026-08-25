@@ -666,33 +666,32 @@ async function legiscanRequest(operation, params = {}) {
  * Get the current/recent session ID for Georgia
  */
 export async function getGASessionId() {
-  const data = await legiscanRequest("getSessionList", { state: "GA" });
-  const sessions = data.sessions || [];
-
-  // Find the 2025-2026 session or most recent
-  const targetSession = sessions.find(
-    (s) =>
-      s.year_start === 2025 ||
-      s.year_start === 2026 ||
-      s.session_name.includes("2025"),
-  );
-
-  return targetSession?.session_id || sessions[0]?.session_id;
+  const sessions = await getGASessions();
+  return sessions[0]?.session_id ?? null;
 }
 
 /**
  * Fetch all bills for a Georgia session
  */
-export async function fetchGABills(sessionId) {
-  if (!sessionId) {
-    sessionId = await getGASessionId();
+export async function fetchGABills(
+  sessionId,
+  {
+    sponsorEnrichmentLimit = 200,
+    enrichCommittees = true,
+    enrichParties = true,
+  } = {},
+) {
+  if (!Number.isSafeInteger(Number(sessionId)) || Number(sessionId) <= 0) {
+    throw new Error("A valid LegiScan session_id is required.");
   }
+  sessionId = Number(sessionId);
 
   const data = await legiscanRequest("getMasterList", {
     state: "GA",
     id: sessionId,
   });
   const masterList = data.masterlist || {};
+  const sessionMeta = masterList.session?.session || masterList.session || {};
 
   const bills = [];
 
@@ -702,13 +701,23 @@ export async function fetchGABills(sessionId) {
     const bill = item.bill || item;
 
     // LegiScan API returns 'number' field, not 'bill_number'
-    const billNumber = bill.bill_number || bill.number;
+    const billNumber = String(bill.bill_number || bill.number || "")
+      .replace(/\s+/g, "")
+      .toUpperCase();
+    if (!billNumber) continue;
 
     // Try to get detailed status info, use last_action as the status description
     const statusCode = bill.status || 1;
     const statusDesc = bill.last_action || "Introduced";
 
     bills.push({
+      state: "GA",
+      session_id: Number(sessionId),
+      session_name:
+        sessionMeta.session_title ||
+        sessionMeta.session_name ||
+        sessionMeta.session_tag ||
+        null,
       legiscan_id: bill.bill_id,
       change_hash: bill.change_hash || null,
       bill_number: billNumber,
@@ -730,7 +739,8 @@ export async function fetchGABills(sessionId) {
             .map((sponsor) => sponsor?.name)
             .filter(Boolean)
         : [],
-      session_year: bill.session?.year_start || 2026,
+      session_year:
+        bill.session?.year_start || sessionMeta.year_start || null,
       status: mapLegiScanStatus(statusCode, statusDesc),
       last_action: bill.last_action || statusDesc,
       last_action_date: bill.last_action_date || bill.status_date,
@@ -747,7 +757,7 @@ export async function fetchGABills(sessionId) {
   // ── Committee name enrichment via pending_committee_id ────────────────────
   // getMasterList returns pending_committee_id (an integer) but not the name.
   // Collect unique IDs, fetch names in parallel, then apply them to bills.
-  try {
+  if (enrichCommittees) try {
     const uniqueCommitteeIds = [
       ...new Set(
         bills
@@ -796,7 +806,7 @@ export async function fetchGABills(sessionId) {
   // ── Party enrichment: one getSessionPeople call instead of one getBill per bill ──
   // getSessionPeople returns all legislators for the session with their party data.
   // We build a lookup map and apply party to every bill instantly.
-  try {
+  if (enrichParties) try {
     const peopleData = await legiscanRequest("getSessionPeople", {
       id: sessionId,
     });
@@ -848,7 +858,10 @@ export async function fetchGABills(sessionId) {
   for (const b of bills) delete b._primarySponsorPeopleId;
 
   // ── Sponsor-name enrichment: only for bills still missing a sponsor name ──
-  const MAX_SPONSOR_ENRICHMENT = 200;
+  const MAX_SPONSOR_ENRICHMENT = Math.max(
+    0,
+    Number(sponsorEnrichmentLimit) || 0,
+  );
   const ENRICHMENT_CONCURRENCY = 8;
 
   const billsNeedingSponsors = bills
@@ -908,19 +921,49 @@ export async function fetchGABills(sessionId) {
  * Returns [{ session_id, session_name, year_start, year_end }].
  */
 let cachedGASessions = null;
+let cachedGASessionsAt = 0;
 export async function getGASessions() {
-  if (cachedGASessions) return cachedGASessions;
+  if (
+    cachedGASessions &&
+    Date.now() - cachedGASessionsAt < 30 * 60 * 1000
+  ) {
+    return cachedGASessions;
+  }
   const data = await legiscanRequest("getSessionList", { state: "GA" });
-  const sessions = (data.sessions || []).map((s) => ({
-    session_id: s.session_id,
-    session_name: s.session_name || s.name || `Session ${s.session_id}`,
-    year_start: s.year_start,
-    year_end: s.year_end,
-    special: s.special === 1,
-  }));
-  // Newest first.
-  sessions.sort((a, b) => (b.year_start || 0) - (a.year_start || 0));
+  const sessions = (data.sessions || [])
+    .map((s) => ({
+      session_id: Number(s.session_id),
+      session_name: s.session_name || s.name || `Session ${s.session_id}`,
+      session_title:
+        s.session_title ||
+        s.session_name ||
+        s.name ||
+        `Session ${s.session_id}`,
+      session_tag:
+        s.session_tag ||
+        (Number(s.special) === 1 ? "Special Session" : "Regular Session"),
+      year_start: s.year_start,
+      year_end: s.year_end,
+      special: Number(s.special) === 1,
+      prior: Number(s.prior) === 1,
+      sine_die: Number(s.sine_die) === 1,
+      prefile: Number(s.prefile) === 1,
+      dataset_hash: s.dataset_hash || null,
+    }))
+    .filter(
+      (session) =>
+        Number.isSafeInteger(session.session_id) && session.session_id > 0,
+    );
+  // Newest first. session_id is the final tie-breaker for multiple sessions
+  // in the same year (for example a regular and a later special session).
+  sessions.sort(
+    (a, b) =>
+      (b.year_start || 0) - (a.year_start || 0) ||
+      b.session_id - a.session_id ||
+      (b.year_end || 0) - (a.year_end || 0),
+  );
   cachedGASessions = sessions;
+  cachedGASessionsAt = Date.now();
   return sessions;
 }
 
@@ -931,8 +974,10 @@ export async function getGASessions() {
  */
 const cachedSessionBills = new Map();
 export async function fetchGABillsLite(sessionId) {
-  if (!sessionId) sessionId = await getGASessionId();
-  if (!sessionId) return [];
+  if (!Number.isSafeInteger(Number(sessionId)) || Number(sessionId) <= 0) {
+    throw new Error("A valid LegiScan session_id is required.");
+  }
+  sessionId = Number(sessionId);
   if (cachedSessionBills.has(sessionId))
     return cachedSessionBills.get(sessionId);
 
@@ -945,9 +990,13 @@ export async function fetchGABillsLite(sessionId) {
   for (const [key, item] of Object.entries(masterList)) {
     if (key === "session") continue;
     const bill = item.bill || item;
-    const billNumber = bill.bill_number || bill.number;
+    const billNumber = String(bill.bill_number || bill.number || "")
+      .replace(/\s+/g, "")
+      .toUpperCase();
     if (!bill.bill_id || !billNumber) continue;
     bills.push({
+      state: "GA",
+      session_id: Number(sessionId),
       legiscan_id: bill.bill_id,
       bill_number: String(billNumber).toUpperCase(),
       title: bill.title || bill.description || "",
@@ -963,10 +1012,10 @@ export async function fetchGABillsLite(sessionId) {
 /**
  * Search Georgia bills by bill number or title keyword within a session.
  * @param {string} query free text (e.g. "HB 1020" or "education")
- * @param {number} [sessionId] defaults to the current session
+ * @param {number} sessionId required LegiScan session_id
  * @param {number} [limit=25]
  */
-export async function searchGABills(query, sessionId = null, limit = 25) {
+export async function searchGABills(query, sessionId, limit = 25) {
   const q = String(query || "")
     .trim()
     .toLowerCase();
@@ -1110,7 +1159,7 @@ export async function fetchBillDetails(billId) {
     sponsor_party: extractPrimaryParty(bill.sponsors),
     sponsors: extractSponsorNames(bill.sponsors),
     co_sponsors: bill.sponsors?.slice(1).map((s) => s.name) || [],
-    session_year: bill.session?.year_start || 2026,
+    session_year: bill.session?.year_start || null,
     status: mapLegiScanStatus(bill.status, bill.status_desc),
     current_committee: bill.committee?.name,
     last_action: bill.history?.[0]?.action || bill.status_desc,

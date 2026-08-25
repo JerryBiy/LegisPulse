@@ -80,11 +80,18 @@ Create the `meeting_transcripts` row first (the app does this via
 import { createClient } from "@supabase/supabase-js";
 const supabase = createClient(URL, SERVICE_ROLE_KEY);
 
-async function monitor(meeting) {
+async function monitor(meeting, { state, legiscanSessionId }) {
   const { data: t } = await supabase
     .from("meeting_transcripts")
-    .upsert({ meeting_id: meeting.id, title: meeting.title, status: "live" },
-            { onConflict: "meeting_id" })
+    .upsert({
+      state,
+      session_id: legiscanSessionId,
+      meeting_id: meeting.id,
+      title: meeting.title,
+      status: "live",
+    }, {
+      onConflict: "state,session_id,meeting_id",
+    })
     .select().single();
 
   const stream = await resolveAudioStream(meeting); // ← you implement this

@@ -18,6 +18,7 @@ import {
   GitCompare,
   Radio,
   Menu,
+  RefreshCw,
 } from "lucide-react";
 import {
   Sidebar,
@@ -34,6 +35,11 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Badge } from "@/components/ui/badge";
+import SessionSelector from "@/components/legislative/SessionSelector";
+import {
+  getSessionDisplayName,
+  useLegislativeSession,
+} from "@/lib/LegislativeSessionContext";
 
 const navigationItems = [
   {
@@ -111,6 +117,17 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
   const { isMobile, setOpenMobile, toggleSidebar } = useSidebar();
+  const {
+    state,
+    selectedSession,
+    selectedSessionId,
+    isReady,
+    isSyncingAllSessions,
+    allSessionSyncProgress,
+    allSessionSyncFailures,
+    lastAllSessionsSyncAt,
+    allSessionSyncError,
+  } = useLegislativeSession();
 
   // Close the mobile drawer after navigating to a tab.
   const closeMobileSidebar = React.useCallback(() => {
@@ -118,8 +135,15 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
   }, [isMobile, setOpenMobile]);
 
   const { data: bills = [] } = useQuery({
-    queryKey: ["bills"],
-    queryFn: () => api.entities.Bill.list(),
+    queryKey: ["bills", state, selectedSessionId],
+    queryFn: () => api.entities.Bill.list(selectedSessionId, undefined, state),
+    enabled: isReady,
+  });
+
+  const { data: trackedBillIds = [] } = useQuery({
+    queryKey: ["trackedBills", state, selectedSessionId],
+    queryFn: () => api.entities.TrackedBill.getNumbers(selectedSessionId, state),
+    enabled: isReady && !!user,
   });
 
   const { data: userData } = useQuery({
@@ -128,7 +152,7 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
   });
 
   const totalBills = bills.length;
-  const trackedCount = (userData?.tracked_bill_ids ?? []).length;
+  const trackedCount = trackedBillIds.length;
   const displayName =
     userData?.username?.trim() || userData?.name || user?.name || "User";
   const displayEmail = userData?.email || user?.email || "";
@@ -137,17 +161,18 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
 
   // ── LC number change notification badges ────────────────────────────────────
   const { data: lcTrackingMap = {} } = useQuery({
-    queryKey: ["lcTracking"],
-    queryFn: () => api.LcTracking.getAll(),
-    enabled: !!user,
+    queryKey: ["lcTracking", state, selectedSessionId],
+    queryFn: () => api.LcTracking.getAll(selectedSessionId, state),
+    enabled: isReady && !!user,
     refetchInterval: 60000,
     staleTime: 30000,
   });
 
   const { data: allTeamBillNumbers = [] } = useQuery({
-    queryKey: ["allTeamBillNumbers"],
-    queryFn: () => api.entities.Team.getAllTeamBillNumbers(),
-    enabled: !!user,
+    queryKey: ["allTeamBillNumbers", state, selectedSessionId],
+    queryFn: () =>
+      api.entities.Team.getAllTeamBillNumbers(selectedSessionId, state),
+    enabled: isReady && !!user,
     staleTime: 60000,
     refetchInterval: 15000,
     refetchOnWindowFocus: true,
@@ -155,7 +180,7 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
 
   // Compute personal vs team unseen LC counts
   const { lcUnseenPersonalCount, lcUnseenTeamCount } = useMemo(() => {
-    const personalBills = new Set(userData?.tracked_bill_ids ?? []);
+    const personalBills = new Set(trackedBillIds);
     const teamBills = new Set(allTeamBillNumbers);
 
     let personal = 0;
@@ -167,7 +192,7 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
       }
     }
     return { lcUnseenPersonalCount: personal, lcUnseenTeamCount: team };
-  }, [lcTrackingMap, userData, allTeamBillNumbers]);
+  }, [lcTrackingMap, trackedBillIds, allTeamBillNumbers]);
 
   // ── Team notification badge ────────────────────────────────────────────────
   const { data: teamNotifications } = useQuery({
@@ -193,9 +218,10 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
 
   // ── Meeting Intelligence unseen-alert badge ────────────────────────────────
   const { data: meetingAlertCount = 0 } = useQuery({
-    queryKey: ["miAlertCount"],
-    queryFn: () => api.meetingIntel.alerts.getUnseenCount(),
-    enabled: !!user,
+    queryKey: ["miAlertCount", state, selectedSessionId],
+    queryFn: () =>
+      api.meetingIntel.alerts.getUnseenCount(selectedSessionId, state),
+    enabled: isReady && !!user,
     refetchInterval: 30000,
     staleTime: 10000,
   });
@@ -278,9 +304,13 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
             </SidebarGroupLabel>
             <SidebarGroupContent>
               <div className="px-3 space-y-1.5">
+                <SessionSelector compact className="mb-3" />
                 <div className="flex items-center justify-between text-sm">
-                  <span className="text-slate-600 font-medium">
-                    Session 2025-2026
+                  <span
+                    className="max-w-[150px] truncate text-slate-600 font-medium"
+                    title={getSessionDisplayName(selectedSession)}
+                  >
+                    {getSessionDisplayName(selectedSession)}
                   </span>
                   <Badge variant="outline" className="text-[10px] px-1.5 py-0">
                     Active
@@ -359,6 +389,47 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
             </div>
           </div>
         </header>
+
+        <section className="border-b border-blue-200 bg-blue-50/90 px-4 py-3" aria-label="Global legislative session">
+          <div className="mx-auto flex max-w-7xl flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge className="bg-blue-700 text-white">Global session</Badge>
+                <span className="font-semibold text-slate-900">
+                  {getSessionDisplayName(selectedSession)}
+                </span>
+                {isSyncingAllSessions && (
+                  <span className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-700">
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    Syncing all sessions {allSessionSyncProgress.completed ?? 0}/
+                    {allSessionSyncProgress.total ?? 0}
+                  </span>
+                )}
+                {!isSyncingAllSessions && lastAllSessionsSyncAt && (
+                  <span className="text-xs text-slate-500">
+                    All sessions synced {new Date(lastAllSessionsSyncAt).toLocaleString()}
+                  </span>
+                )}
+                {!isSyncingAllSessions && allSessionSyncFailures.length > 0 && (
+                  <span className="text-xs font-medium text-red-700">
+                    {allSessionSyncFailures.length} session sync
+                    {allSessionSyncFailures.length === 1 ? "" : "s"} failed
+                  </span>
+                )}
+                {!isSyncingAllSessions && allSessionSyncError && (
+                  <span className="text-xs font-medium text-red-700">
+                    Sync failed: {allSessionSyncError.message}
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-slate-600">
+                This selection applies across bills, tracking, teams, calendar, meetings,
+                committees, comparison, social feeds, email lists, notifications, and alerts.
+              </p>
+            </div>
+            <SessionSelector compact className="w-full shrink-0 lg:w-[300px]" />
+          </div>
+        </section>
 
         <div className="flex-1 overflow-auto min-h-0">{children}</div>
       </main>

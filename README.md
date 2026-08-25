@@ -10,12 +10,12 @@ LegisPulse tracks Georgia legislative bills and provides AI-generated bill analy
 - **Team chat** — real-time messaging between team members with emoji, file/image attachments, drag-and-drop upload, and auto-expiry after 2½ weeks
 - **LC number tracking (all bills)** — a background scraper keeps the LC (Legislative Counsel) number for every bill in the session up to date from legis.ga.gov, with change notifications
 - **Comparison tab** — compare two bill versions/substitutes side-by-side with an AI-generated summary of additions, removals, and modifications, plus authoritative per-version LC numbers and chamber labels
-- **Calendar** — Georgia committee meeting schedule pulled from legis.ga.gov
-- **Committees** — browse committees, members, and assigned bills
+- **Calendar** — session-scoped Georgia meetings with exact agenda bill lists
+- **Committees** — browse official committees, members, all bills, and saved bills that are currently assigned
 - **Twitter/X feed** — embedded legislative news feed
 - **Account profile & settings** — display name, username, and avatar upload
-- Sync Georgia bills from LegiScan (full session, 4000+ bills via paginated fetch)
-- Auto-sync on first load when no bills are in the database
+- Sync every available Georgia session from LegiScan via lightweight master lists
+- Auto-sync all sessions on the first authenticated app load without per-bill enrichment fan-out
 - Show newest bills first (higher bill number first)
 - Search by bill number/text with improved exact matching (e.g. `HB10` and `HB 10`)
 - Track/untrack bills — persisted to your account across devices
@@ -25,6 +25,32 @@ LegisPulse tracks Georgia legislative bills and provides AI-generated bill analy
 - Generate and regenerate AI summaries from bill text context (`summary` + `changes_analysis`)
 - Instant tab navigation — data is cached in memory so switching pages does not reload from the server
 - Scroll position and "load more" count are remembered when navigating away from Dashboard
+
+## Legislative Session Boundary
+
+The session selector is populated only from LegiScan's session list and defaults
+to its newest valid session. The selected LegiScan `session_id` is a global
+application boundary for bills, personal and team tracking, notes, LC history,
+calendar records, meetings, transcripts, alerts, notifications, and tweets.
+Same-numbered bills in different sessions are separate records.
+
+Migration `034_legiscan_session_isolation.sql` first isolates ambiguous legacy
+rows under `session_id = 0`; migration `035_remove_legacy_session_zero.sql`
+then deletes those unassignable rows and requires a positive session ID for
+all session-owned records. Tweet ingestion must also write `state`,
+`session_id`, and session-qualified bill references.
+
+LegiScan IDs and legis.ga.gov IDs are different namespaces. The browser matches
+committee rosters and meetings through the official legis.ga.gov session
+directory by exact year range and regular/special type. Optional `VITE_*`
+mapping values can override that discovery. The server-side LC worker still
+requires its explicit, separately verified ID pair.
+
+Session syncs use database RPC upserts that update only provider-owned fields;
+they do not delete the session or overwrite user summaries, analysis, tags, or
+PDF links. Automatic all-session refreshes skip committee, people, sponsor, and
+history fan-out calls while preserving richer stored fields. Detail calls remain
+change-aware and processed in bounded batches when explicitly requested.
 
 ## Team Feature
 
@@ -99,6 +125,8 @@ Attachments are uploaded to a Supabase Storage bucket named `team-chat-files`. S
 | `023_ga_meetings_cache.sql`     | Cache table for legis.ga.gov committee meetings                               |
 | `024_bill_lc_history.sql`       | Global, one-row-per-bill `bill_lc_history` table (LC source of truth)         |
 | `026_lc_history_all_bills.sql`  | Adds `legislation_id` to `bill_lc_history` for all-bills tracking             |
+| `034_legiscan_session_isolation.sql` | Session keys, safe sync/legacy RPCs, and scoped indexes                |
+| `035_remove_legacy_session_zero.sql` | Purges ambiguous legacy rows and requires positive session IDs         |
 
 Run each migration in the Supabase **SQL Editor** in order.
 
@@ -110,7 +138,7 @@ Every bill on legis.ga.gov carries an internal **LC (Legislative Counsel) number
 
 - The scraper lives in [`server/lcRecheck.js`](server/lcRecheck.js) and runs **server-side on the Node host** (`npm start` → `server.js`). It must run from a US cloud host (e.g. Render) because legis.ga.gov firewalls Supabase edge IPs and most non-US egress.
 - It enumerates every bill via `POST /api/Legislation/Search`, then reads `GET /api/legislation/Detail/{id}` and extracts the newest LC number from the `versions[]` list.
-- Results are written to the global `bill_lc_history` table (one row per bill, with `legislation_id` bridging back to legis.ga.gov). Changed LC numbers are mirrored into the per-user `bills.lc_number` column.
+- Results are written to the global `bill_lc_history` table (one row per state/session/bill, with `legislation_id` bridging back to legis.ga.gov). Changed LC numbers are mirrored into the matching session's per-user `bills.lc_number` column.
 - Work is **incremental** — a bill is only re-fetched when it is new or its status date advanced — so steady-state runs are fast.
 
 ### Endpoint & scheduler (`server.js`)
@@ -179,6 +207,8 @@ VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
 # Optional
 VITE_OPENAI_MODEL=gpt-4o-mini
 VITE_OPENAI_BASE_URL=https://api.openai.com/v1
+VITE_LEGIS_GA_LEGISCAN_SESSION_ID=optional_legiscan_session_override
+VITE_LEGIS_GA_SESSION_ID=optional_matching_legis_ga_session_override
 ```
 
 ### Server-side variables (LC scraper)
@@ -188,11 +218,15 @@ These are **not** `VITE_*` and are only read by the Node host (`server.js` / `se
 ```env
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+LEGISCAN_SESSION_ID=your_legiscan_session_id
+LEGIS_GA_SESSION_ID=the_matching_legis_ga_session_id
 LC_RECHECK_SECRET=a_long_random_string          # gates POST /api/lc-recheck
 LC_RECHECK_INTERVAL_MS=3600000                  # optional, default 1 hour
 ```
 
-The scraper is disabled automatically when `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` are absent.
+The scraper is disabled automatically when credentials or either side of the
+explicit provider-session mapping is absent. It verifies the configured
+`LEGIS_GA_SESSION_ID` against the current legis.ga.gov session before writing.
 
 Get your Supabase URL and anon key from **Project Settings → API** in the [Supabase dashboard](https://supabase.com/dashboard).
 
@@ -200,10 +234,15 @@ Get your Supabase URL and anon key from **Project Settings → API** in the [Sup
 
 ### Step 1 — Run the migration
 
-Run `supabase/migrations/001_initial_schema.sql` once in your Supabase project's **SQL Editor**. This creates:
+Apply every SQL file in `supabase/migrations` in numeric order. Existing
+deployments must apply `034_legiscan_session_isolation.sql` and
+`035_remove_legacy_session_zero.sql` together with
+the matching application release; older number-only upserts and RPC calls are
+intentionally incompatible with the session-safe schema. This creates:
 
-- `profiles` — one row per user, stores `tracked_bill_ids` (jsonb array)
-- `bills` — full bill records synced from LegiScan
+- `profiles` — one row per user; its obsolete legacy tracking array is cleared
+- `tracked_bill_ids` — session-scoped personal tracking with positive session IDs only
+- `bills` — full, session-scoped bill records synced from LegiScan
 - `teams`, `team_members`, `team_bills` — team collaboration tables
 - `email_lists`, `notifications`, `tweets` — supporting tables
 - Row Level Security policies so users only access their own data
@@ -307,10 +346,15 @@ Add these environment variables in your hosting dashboard:
 - `VITE_OPENAI_API_KEY`
 - `VITE_SUPABASE_URL`
 - `VITE_SUPABASE_ANON_KEY`
+- optional `VITE_LEGIS_GA_LEGISCAN_SESSION_ID` override
+- optional `VITE_LEGIS_GA_SESSION_ID` override
 - optional `VITE_OPENAI_MODEL`
 - optional `VITE_OPENAI_BASE_URL`
 
-For the LC scraper (Node host only): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `LC_RECHECK_SECRET`, optional `LC_RECHECK_INTERVAL_MS`.
+For the LC scraper (Node host only): `SUPABASE_URL`,
+`SUPABASE_SERVICE_ROLE_KEY`, `LEGISCAN_SESSION_ID`,
+`LEGIS_GA_SESSION_ID`, `LC_RECHECK_SECRET`, and optional
+`LC_RECHECK_INTERVAL_MS`.
 
 ## Security Warning (Important)
 

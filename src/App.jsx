@@ -13,6 +13,7 @@ import PageNotFound from "./lib/PageNotFound";
 import { AuthProvider, useAuth } from "@/lib/AuthContext";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
+import { LegislativeSessionProvider } from "@/lib/LegislativeSessionContext";
 
 const { Pages, Layout, mainPage } = pagesConfig;
 const mainPageKey = mainPage ?? Object.keys(Pages)[0];
@@ -47,28 +48,30 @@ const AuthenticatedApp = () => {
 
   // Render the main app
   return (
-    <Routes>
-      <Route
-        path="/"
-        element={
-          <LayoutWrapper currentPageName={mainPageKey}>
-            <MainPage />
-          </LayoutWrapper>
-        }
-      />
-      {Object.entries(Pages).map(([path, Page]) => (
+    <LegislativeSessionProvider>
+      <Routes>
         <Route
-          key={path}
-          path={`/${path}`}
+          path="/"
           element={
-            <LayoutWrapper currentPageName={path}>
-              <Page />
+            <LayoutWrapper currentPageName={mainPageKey}>
+              <MainPage />
             </LayoutWrapper>
           }
         />
-      ))}
-      <Route path="*" element={<PageNotFound />} />
-    </Routes>
+        {Object.entries(Pages).map(([path, Page]) => (
+          <Route
+            key={path}
+            path={`/${path}`}
+            element={
+              <LayoutWrapper currentPageName={path}>
+                <Page />
+              </LayoutWrapper>
+            }
+          />
+        ))}
+        <Route path="*" element={<PageNotFound />} />
+      </Routes>
+    </LegislativeSessionProvider>
   );
 };
 

@@ -31,9 +31,11 @@
 //     responsive.
 //
 // ── Environment variables ────────────────────────────────────────
-//   SUPABASE_URL                — required (project URL)
-//   SUPABASE_SERVICE_ROLE_KEY   — required (service-role key, writes)
-//   LC_RECHECK_SECRET           — optional shared secret for the HTTP
+//   SUPABASE_URL                - required (project URL)
+//   SUPABASE_SERVICE_ROLE_KEY   - required (service-role key, writes)
+//   LEGISCAN_SESSION_ID         - required LegiScan session_id
+//   LEGIS_GA_SESSION_ID         - required matching legis.ga.gov session id
+//   LC_RECHECK_SECRET           - optional shared secret for the HTTP
 //                                 trigger (header x-recheck-secret)
 //   LC_RECHECK_INTERVAL_MS      — optional scheduler interval (ms)
 
@@ -49,7 +51,8 @@ try {
 }
 
 // ── legis.ga.gov API constants (mirror of src/services/legisGa.js) ─
-const LEGIS_BASE = "https://www.legis.ga.gov/api";
+const LEGIS_GA_BASE = "https://www.legis.ga.gov/api";
+const LEGISLATIVE_STATE = "GA";
 const OBSCURE_KEY = "jVEXFFwSu36BwwcP83xYgxLAhLYmKk";
 const TOKEN_SALT = "QFpCwKfd7f";
 const TOKEN_CONST = "letvarconst";
@@ -103,7 +106,7 @@ async function fetchToken() {
   const ms = Date.now();
   const key = await sha512Hex(TOKEN_SALT + OBSCURE_KEY + TOKEN_CONST + ms);
   const res = await fetch(
-    `${LEGIS_BASE}/authentication/token?key=${key}&ms=${ms}`,
+    `${LEGIS_GA_BASE}/authentication/token?key=${key}&ms=${ms}`,
   );
   if (!res.ok) throw new Error(`legis token request failed: ${res.status}`);
   const raw = await res.text();
@@ -117,9 +120,12 @@ async function getToken() {
   return fetchToken();
 }
 
-async function legisFetch(path, { method = "GET", body, retry = true } = {}) {
+async function legisGaFetch(
+  path,
+  { method = "GET", body, retry = true } = {},
+) {
   const token = await getToken();
-  const res = await fetch(`${LEGIS_BASE}${path}`, {
+  const res = await fetch(`${LEGIS_GA_BASE}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -130,12 +136,12 @@ async function legisFetch(path, { method = "GET", body, retry = true } = {}) {
   if (res.status === 401 && retry) {
     cachedToken = null;
     cachedTokenExpiresAt = 0;
-    return legisFetch(path, { method, body, retry: false });
+    return legisGaFetch(path, { method, body, retry: false });
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(
-      `legis ${method} ${path} ${res.status} ${text.slice(0, 120)}`,
+      `legis.ga.gov ${method} ${path} ${res.status} ${text.slice(0, 120)}`,
     );
   }
   if (res.status === 204) return null;
@@ -143,11 +149,29 @@ async function legisFetch(path, { method = "GET", body, retry = true } = {}) {
 }
 
 // ── Session + enumeration ────────────────────────────────────────
-async function getCurrentSessionId() {
+async function getCurrentGaSessionId() {
   // Committee 87 (Ag & Consumer Affairs) is long-standing; its detail
   // payload carries the current sessionId.
-  const data = await legisFetch("/committees/details/87");
+  const data = await legisGaFetch("/committees/details/87");
   return data?.sessionId ?? null;
+}
+
+/**
+ * This LegiScan session id scopes database rows only. It is not the unrelated
+ * legis.ga.gov sessionId consumed by the scraper endpoints below.
+ */
+function getConfiguredLegiscanSessionId() {
+  const raw = String(process.env.LEGISCAN_SESSION_ID ?? "").trim();
+  if (!/^\d+$/.test(raw)) return null;
+  const sessionId = Number(raw);
+  return Number.isSafeInteger(sessionId) && sessionId > 0 ? sessionId : null;
+}
+
+function getConfiguredGaSessionId() {
+  const raw = String(process.env.LEGIS_GA_SESSION_ID ?? "").trim();
+  if (!/^\d+$/.test(raw)) return null;
+  const sessionId = Number(raw);
+  return Number.isSafeInteger(sessionId) && sessionId > 0 ? sessionId : null;
 }
 
 function buildBillNumber(b) {
@@ -159,14 +183,14 @@ function buildBillNumber(b) {
   return `${chamber}${doc}${num}${suffix}`.toUpperCase();
 }
 
-async function enumerateAllBills(sessionId) {
+async function enumerateAllBills(gaSessionId) {
   const out = [];
   let page = 0;
   let total = Infinity;
   while (page * SEARCH_PAGE_SIZE < total && page < 300) {
-    const data = await legisFetch(
+    const data = await legisGaFetch(
       `/Legislation/Search/${SEARCH_PAGE_SIZE}/${page}`,
-      { method: "POST", body: { sessionId } },
+      { method: "POST", body: { sessionId: gaSessionId } },
     );
     const results = data?.results ?? [];
     if (typeof data?.resultCount === "number") total = data.resultCount;
@@ -189,7 +213,7 @@ async function enumerateAllBills(sessionId) {
 }
 
 async function fetchCurrentLc(legislationId) {
-  const data = await legisFetch(`/legislation/Detail/${legislationId}`);
+  const data = await legisGaFetch(`/legislation/Detail/${legislationId}`);
   return currentLcFromVersions(data?.versions ?? []);
 }
 
@@ -204,6 +228,14 @@ let running = false;
  * @returns {Promise<object>} summary
  */
 export async function runLcRecheck({ budgetMs = 0 } = {}) {
+  const legiscanSessionId = getConfiguredLegiscanSessionId();
+  const configuredGaSessionId = getConfiguredGaSessionId();
+  if (!legiscanSessionId || !configuredGaSessionId) {
+    const reason =
+      "LEGISCAN_SESSION_ID and LEGIS_GA_SESSION_ID must define an explicit provider-session mapping";
+    console.warn(`[lc-recheck] skipped: ${reason}`);
+    return { skipped: true, reason, state: LEGISLATIVE_STATE };
+  }
   if (running) return { skipped: true, reason: "already running" };
   running = true;
   const startedAt = Date.now();
@@ -222,17 +254,32 @@ export async function runLcRecheck({ budgetMs = 0 } = {}) {
   });
 
   try {
-    // 1. Resolve session + enumerate every bill.
-    const sessionId = await getCurrentSessionId();
-    if (!sessionId) throw new Error("could not resolve current session");
-    const allBills = await enumerateAllBills(sessionId);
+    // 1. Resolve the independent legis.ga.gov source session and enumerate it.
+    // `legiscanSessionId` is deliberately never passed to this source API.
+    const gaSessionId = await getCurrentGaSessionId();
+    if (!gaSessionId) {
+      throw new Error("could not resolve current legis.ga.gov sessionId");
+    }
+    if (Number(gaSessionId) !== configuredGaSessionId) {
+      throw new Error(
+        `configured legis.ga.gov session ${configuredGaSessionId} does not match current provider session ${gaSessionId}`,
+      );
+    }
+    console.log(
+      `[lc-recheck] DB scope state=${LEGISLATIVE_STATE} ` +
+        `LegiScan session_id=${legiscanSessionId}; ` +
+        `source legis.ga.gov sessionId=${gaSessionId}`,
+    );
+    const allBills = await enumerateAllBills(gaSessionId);
 
     // 2. Load existing history to compute the incremental work set.
     const { data: existingRows, error: histErr } = await supabase
       .from("bill_lc_history")
       .select(
         "bill_number, current_lc, previous_lc, lc_changed_at, status_date",
-      );
+      )
+      .eq("state", LEGISLATIVE_STATE)
+      .eq("session_id", legiscanSessionId);
     if (histErr) throw new Error(`history read failed: ${histErr.message}`);
     const existingMap = new Map();
     for (const r of existingRows ?? []) existingMap.set(r.bill_number, r);
@@ -259,9 +306,10 @@ export async function runLcRecheck({ budgetMs = 0 } = {}) {
       pending = [];
       const { error } = await supabase
         .from("bill_lc_history")
-        .upsert(batch, { onConflict: "bill_number" });
-      if (error)
-        console.error("[lc-recheck] history upsert failed:", error.message);
+        .upsert(batch, { onConflict: "state,session_id,bill_number" });
+      if (error) {
+        throw new Error(`history upsert failed: ${error.message}`);
+      }
     };
 
     let timedOut = false;
@@ -287,6 +335,8 @@ export async function runLcRecheck({ budgetMs = 0 } = {}) {
         if (newLc) resolved += 1;
         const isChange = oldLc !== null && newLc !== null && oldLc !== newLc;
         pending.push({
+          state: LEGISLATIVE_STATE,
+          session_id: legiscanSessionId,
           bill_number: b.bill_number,
           legislation_id: b.legislation_id,
           status_date: b.status_date,
@@ -310,13 +360,23 @@ export async function runLcRecheck({ budgetMs = 0 } = {}) {
     // 4. Mirror changed LC numbers into per-user `bills.lc_number` so
     //    already-tracked cards reflect the new value immediately.
     for (const c of changes) {
-      await supabase
+      const { error: mirrorError } = await supabase
         .from("bills")
         .update({ lc_number: c.current_lc })
+        .eq("state", LEGISLATIVE_STATE)
+        .eq("session_id", legiscanSessionId)
         .eq("bill_number", c.bill_number);
+      if (mirrorError) {
+        throw new Error(
+          `bill LC mirror update failed for ${c.bill_number}: ${mirrorError.message}`,
+        );
+      }
     }
 
     const summary = {
+      state: LEGISLATIVE_STATE,
+      legiscanSessionId,
+      gaSessionId,
       totalBills: allBills.length,
       work: workSet.length,
       processed,
@@ -328,7 +388,10 @@ export async function runLcRecheck({ budgetMs = 0 } = {}) {
       changes,
     };
     console.log(
-      `[lc-recheck] total=${summary.totalBills} work=${summary.work} ` +
+      `[lc-recheck] state=${summary.state} ` +
+        `LegiScanSession=${summary.legiscanSessionId} ` +
+        `gaSession=${summary.gaSessionId} total=${summary.totalBills} ` +
+        `work=${summary.work} ` +
         `processed=${summary.processed} resolved=${summary.resolved} ` +
         `changed=${summary.changed} timedOut=${summary.timedOut} ` +
         `tookMs=${summary.tookMs}`,
@@ -345,6 +408,15 @@ export async function runLcRecheck({ budgetMs = 0 } = {}) {
  * credentials are missing so local/dev servers don't crash.
  */
 export function startLcRecheckScheduler() {
+  const legiscanSessionId = getConfiguredLegiscanSessionId();
+  const configuredGaSessionId = getConfiguredGaSessionId();
+  if (!legiscanSessionId || !configuredGaSessionId) {
+    console.log(
+      "[lc-recheck] scheduler disabled " +
+        "(LEGISCAN_SESSION_ID and LEGIS_GA_SESSION_ID must be mapped)",
+    );
+    return;
+  }
   if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
     console.log("[lc-recheck] scheduler disabled (no Supabase service creds)");
     return;
@@ -358,5 +430,9 @@ export function startLcRecheckScheduler() {
   // First run 20s after boot so it doesn't compete with cold-start traffic.
   setTimeout(tick, 20_000);
   setInterval(tick, interval);
-  console.log(`[lc-recheck] scheduler started (every ${interval}ms)`);
+  console.log(
+    `[lc-recheck] scheduler started for ${LEGISLATIVE_STATE} ` +
+      `LegiScan session_id=${legiscanSessionId} ` +
+      `legis.ga.gov sessionId=${configuredGaSessionId} (every ${interval}ms)`,
+  );
 }

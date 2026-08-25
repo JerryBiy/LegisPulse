@@ -28,11 +28,11 @@ import {
   searchGABills,
   fetchBillTextVersionsForAI,
   fetchNewestBillText,
-  getGASessions,
   findBillInSession,
   isLegiScanConfigured,
 } from "@/services/legiscan";
 import { fetchBillVersionsGa } from "@/services/legisGa";
+import { useLegislativeSession } from "@/lib/LegislativeSessionContext";
 
 // ── Chamber / LC helpers ─────────────────────────────────────
 // Bill numbers look like "HB1020", "SB45", "HR12", "SR3".
@@ -378,9 +378,9 @@ Requirements:
 }
 
 // Build an LC-number lookup from global LC tracking (best-effort).
-async function loadLcMap() {
+async function loadLcMap(sessionId, state) {
   try {
-    const map = await api.LcTracking.getAll();
+    const map = await api.LcTracking.getAll(sessionId, state);
     return map || {};
   } catch {
     return {};
@@ -392,23 +392,48 @@ async function loadLcMap() {
 // ════════════════════════════════════════════════════════════
 export default function Comparison() {
   const configured = isLegiScanConfigured();
+  const {
+    state,
+    sessions,
+    selectedSessionId: currentSessionId,
+    isReady,
+  } = useLegislativeSession();
   const [lcMap, setLcMap] = useState({});
-  const [sessions, setSessions] = useState([]);
-  const [currentSessionId, setCurrentSessionId] = useState(null);
   const [error, setError] = useState("");
   const [isComparing, setIsComparing] = useState(false);
   const [result, setResult] = useState(null);
+  const lcMapRequestRef = useRef(0);
+  const comparisonRequestRef = useRef(0);
+  const comparisonScopeKey = `${state}:${currentSessionId ?? "none"}`;
+  const activeScopeRef = useRef(comparisonScopeKey);
+  activeScopeRef.current = comparisonScopeKey;
 
   useEffect(() => {
-    if (!configured) return;
-    loadLcMap().then(setLcMap);
-    getGASessions()
-      .then((s) => {
-        setSessions(s);
-        if (s.length) setCurrentSessionId(s[0].session_id);
-      })
-      .catch((e) => console.warn("session list failed", e));
-  }, [configured]);
+    const requestId = ++lcMapRequestRef.current;
+
+    // Clear all session-derived state immediately; pending work from the old
+    // session is invalidated before any replacement request can complete.
+    comparisonRequestRef.current += 1;
+    setLcMap({});
+    setResult(null);
+    setError("");
+    setIsComparing(false);
+
+    if (!configured || !isReady || !currentSessionId) return undefined;
+
+    loadLcMap(currentSessionId, state).then((nextLcMap) => {
+      if (requestId === lcMapRequestRef.current) {
+        setLcMap(nextLcMap);
+      }
+    });
+
+    return () => {
+      if (requestId === lcMapRequestRef.current) {
+        lcMapRequestRef.current += 1;
+      }
+      comparisonRequestRef.current += 1;
+    };
+  }, [configured, currentSessionId, isReady, state]);
 
   const lcFor = useCallback(
     (billNumber) => {
@@ -418,10 +443,15 @@ export default function Comparison() {
     [lcMap],
   );
 
-  const runCompare = useCallback(async (sideA, sideB) => {
+  const runCompare = useCallback(async (sideA, sideB, originScope) => {
+    if (originScope !== activeScopeRef.current) return;
+    const requestId = ++comparisonRequestRef.current;
+
     setError("");
     setResult(null);
     if (!sideA?.text || !sideB?.text) {
+      if (originScope !== activeScopeRef.current) return;
+      setIsComparing(false);
       setError(
         "Could not retrieve text for both versions from LegiScan. One of the documents may not have published text yet.",
       );
@@ -430,15 +460,32 @@ export default function Comparison() {
     setIsComparing(true);
     try {
       const ai = await compareTexts(sideA, sideB);
+      if (
+        requestId !== comparisonRequestRef.current ||
+        originScope !== activeScopeRef.current
+      ) {
+        return;
+      }
       setResult({ sideA, sideB, ai });
     } catch (e) {
+      if (
+        requestId !== comparisonRequestRef.current ||
+        originScope !== activeScopeRef.current
+      ) {
+        return;
+      }
       console.error("comparison failed", e);
       setError(
         e?.message ||
           "Failed to generate the comparison. Check your AI API key and try again.",
       );
     } finally {
-      setIsComparing(false);
+      if (
+        requestId === comparisonRequestRef.current &&
+        originScope === activeScopeRef.current
+      ) {
+        setIsComparing(false);
+      }
     }
   }, []);
 
@@ -478,7 +525,9 @@ export default function Comparison() {
 
           <TabsContent value="versions" className="mt-4">
             <VersionsMode
+              key={`versions-${currentSessionId}`}
               sessionId={currentSessionId}
+              scopeKey={comparisonScopeKey}
               onCompare={runCompare}
               busy={isComparing}
             />
@@ -486,7 +535,9 @@ export default function Comparison() {
 
           <TabsContent value="two-bills" className="mt-4">
             <TwoBillsMode
+              key={`two-${currentSessionId}`}
               sessionId={currentSessionId}
+              scopeKey={comparisonScopeKey}
               lcFor={lcFor}
               onCompare={runCompare}
               busy={isComparing}
@@ -495,8 +546,9 @@ export default function Comparison() {
 
           <TabsContent value="across-years" className="mt-4">
             <AcrossYearsMode
+              key={`years-${currentSessionId}`}
               sessions={sessions}
-              lcFor={lcFor}
+              scopeKey={comparisonScopeKey}
               onCompare={runCompare}
               busy={isComparing}
             />
@@ -504,7 +556,9 @@ export default function Comparison() {
 
           <TabsContent value="by-topic" className="mt-4">
             <ByTopicMode
+              key={`topic-${currentSessionId}`}
               sessionId={currentSessionId}
+              scopeKey={comparisonScopeKey}
               lcFor={lcFor}
               onCompare={runCompare}
               busy={isComparing}
@@ -534,7 +588,7 @@ export default function Comparison() {
 }
 
 // ── Mode 1: versions of one bill ─────────────────────────────
-function VersionsMode({ sessionId, lcFor, onCompare, busy }) {
+function VersionsMode({ sessionId, scopeKey, onCompare, busy }) {
   const [bill, setBill] = useState(null);
   const [versions, setVersions] = useState([]);
   const [loadingVersions, setLoadingVersions] = useState(false);
@@ -555,7 +609,7 @@ function VersionsMode({ sessionId, lcFor, onCompare, busy }) {
     // version carries its own LC number + chamber.
     Promise.all([
       fetchBillTextVersionsForAI(bill.legiscan_id, 8),
-      api.LcTracking.getLegislationId(bill.bill_number)
+      api.LcTracking.getLegislationId(bill.bill_number, sessionId)
         .then((lid) => (lid ? fetchBillVersionsGa(lid) : []))
         .catch((e) => {
           console.warn("legis.ga.gov versions failed", e);
@@ -578,7 +632,7 @@ function VersionsMode({ sessionId, lcFor, onCompare, busy }) {
     return () => {
       cancelled = true;
     };
-  }, [bill]);
+  }, [bill, sessionId]);
 
   const versionLabel = (v, i) =>
     `${v.lc || v.type || "Version"}${v.date ? ` — ${v.date}` : ""}${i === 0 ? " (newest)" : ""}`;
@@ -609,7 +663,7 @@ function VersionsMode({ sessionId, lcFor, onCompare, busy }) {
       date: vB.date,
       text: vB.text,
     };
-    onCompare(sideA, sideB);
+    onCompare(sideA, sideB, scopeKey);
   };
 
   return (
@@ -696,7 +750,7 @@ function VersionsMode({ sessionId, lcFor, onCompare, busy }) {
 }
 
 // ── Mode 2: two different bills ──────────────────────────────
-function TwoBillsMode({ sessionId, lcFor, onCompare, busy }) {
+function TwoBillsMode({ sessionId, scopeKey, lcFor, onCompare, busy }) {
   const [billA, setBillA] = useState(null);
   const [billB, setBillB] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -728,7 +782,7 @@ function TwoBillsMode({ sessionId, lcFor, onCompare, busy }) {
         date: tB?.date,
         text: tB?.text,
       };
-      onCompare(sideA, sideB);
+      onCompare(sideA, sideB, scopeKey);
     } catch (e) {
       setLocalError(e?.message || "Failed to load bill text.");
     } finally {
@@ -789,7 +843,7 @@ function TwoBillsMode({ sessionId, lcFor, onCompare, busy }) {
 }
 
 // ── Mode 3: across years ─────────────────────────────────────
-function AcrossYearsMode({ sessions, lcFor, onCompare, busy }) {
+function AcrossYearsMode({ sessions, scopeKey, onCompare, busy }) {
   const [billNumber, setBillNumber] = useState("");
   const [sessionA, setSessionA] = useState("");
   const [sessionB, setSessionB] = useState("");
@@ -844,7 +898,7 @@ function AcrossYearsMode({ sessions, lcFor, onCompare, busy }) {
         date: tB?.date,
         text: tB?.text,
       };
-      onCompare(sideA, sideB);
+      onCompare(sideA, sideB, scopeKey);
     } catch (e) {
       setLocalError(e?.message || "Failed to load versions across years.");
     } finally {
@@ -933,7 +987,7 @@ function AcrossYearsMode({ sessions, lcFor, onCompare, busy }) {
 }
 
 // ── Mode 4: by topic ─────────────────────────────────────────
-function ByTopicMode({ sessionId, lcFor, onCompare, busy }) {
+function ByTopicMode({ sessionId, scopeKey, lcFor, onCompare, busy }) {
   const [topic, setTopic] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -996,7 +1050,7 @@ function ByTopicMode({ sessionId, lcFor, onCompare, busy }) {
         date: tB?.date,
         text: tB?.text,
       };
-      onCompare(sideA, sideB);
+      onCompare(sideA, sideB, scopeKey);
     } catch (e) {
       setLocalError(e?.message || "Failed to load bill text.");
     } finally {

@@ -51,6 +51,7 @@ import BillCard from "../components/bills/BillCard";
 import TrackedBillDetail from "../components/bills/TrackedBillDetail";
 import { useResizableHeight, ResizeHandle } from "@/hooks/use-resizable-height";
 import { fetchBillSponsors } from "@/services/legiscan";
+import { useLegislativeSession } from "@/lib/LegislativeSessionContext";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -117,6 +118,7 @@ const chamberFolderClass = (chamber) =>
 
 export default function TrackedBills() {
   const queryClient = useQueryClient();
+  const { state, selectedSessionId, isReady } = useLegislativeSession();
 
   // ── Folder navigation state ────────────────────────────────────────────────
   const [activeCategory, setActiveCategory] = useState(null); // "HB" | … | null
@@ -165,19 +167,23 @@ export default function TrackedBills() {
   };
 
   // ── Data queries ───────────────────────────────────────────────────────────
-  const { data: userData } = useQuery({
-    queryKey: ["profile"],
-    queryFn: () => api.auth.me().catch(() => null),
+  const { data: trackedBillIds = [] } = useQuery({
+    queryKey: ["trackedBills", state, selectedSessionId],
+    queryFn: () => api.entities.TrackedBill.getNumbers(selectedSessionId, state),
+    enabled: isReady,
   });
 
   const { data: allBills = [], isLoading } = useQuery({
-    queryKey: ["bills"],
-    queryFn: () => api.entities.Bill.list(),
+    queryKey: ["bills", state, selectedSessionId],
+    queryFn: () => api.entities.Bill.list(selectedSessionId, undefined, state),
+    enabled: isReady,
   });
 
   const { data: allTeamBillNumbers = [] } = useQuery({
-    queryKey: ["allTeamBillNumbers"],
-    queryFn: () => api.entities.Team.getAllTeamBillNumbers(),
+    queryKey: ["allTeamBillNumbers", state, selectedSessionId],
+    queryFn: () =>
+      api.entities.Team.getAllTeamBillNumbers(selectedSessionId, state),
+    enabled: isReady,
     staleTime: 0,
     refetchInterval: 15000,
     refetchOnWindowFocus: true,
@@ -185,21 +191,33 @@ export default function TrackedBills() {
 
   // Fetch shared bill data from teammates via RPC
   const { data: sharedBillData = [] } = useQuery({
-    queryKey: ["sharedTeamBillData", "all", allTeamBillNumbers],
-    queryFn: () => api.entities.Team.getSharedTeamBillData(allTeamBillNumbers),
-    enabled: allTeamBillNumbers.length > 0,
+    queryKey: [
+      "sharedTeamBillData",
+      state,
+      selectedSessionId,
+      allTeamBillNumbers,
+    ],
+    queryFn: () =>
+      api.entities.Team.getSharedTeamBillData(
+        allTeamBillNumbers,
+        selectedSessionId,
+        state,
+      ),
+    enabled: isReady && allTeamBillNumbers.length > 0,
     staleTime: 0,
   });
 
   const { data: personalMeta = {} } = useQuery({
-    queryKey: ["personalBillMeta"],
-    queryFn: () => api.entities.UserBillMeta.getAll(),
+    queryKey: ["personalBillMeta", state, selectedSessionId],
+    queryFn: () => api.entities.UserBillMeta.getAll(selectedSessionId, state),
+    enabled: isReady,
   });
 
   // ── LC Tracking data ───────────────────────────────────────────────────────
   const { data: lcTrackingMap = {} } = useQuery({
-    queryKey: ["lcTracking"],
-    queryFn: () => api.LcTracking.getAll(),
+    queryKey: ["lcTracking", state, selectedSessionId],
+    queryFn: () => api.LcTracking.getAll(selectedSessionId, state),
+    enabled: isReady,
   });
 
   const {
@@ -213,7 +231,6 @@ export default function TrackedBills() {
     minHeight: 150,
   });
 
-  const trackedBillIds = userData?.tracked_bill_ids ?? [];
   const effectiveTrackedBillNumbers = useMemo(
     () => [
       ...new Set([...(trackedBillIds ?? []), ...(allTeamBillNumbers ?? [])]),
@@ -245,6 +262,14 @@ export default function TrackedBills() {
   // and therefore can't be written back through our own RLS-scoped update).
   const [resolvedSponsors, setResolvedSponsors] = useState({});
   const sponsorFetchAttempted = useRef(new Set());
+  useEffect(() => {
+    setActiveCategory(null);
+    setActiveRange(null);
+    setDetailBillNumber(null);
+    setResolvedSponsors({});
+    sponsorFetchAttempted.current = new Set();
+  }, [selectedSessionId]);
+
   useEffect(() => {
     const needing = trackedBills.filter(
       (b) =>
@@ -291,9 +316,11 @@ export default function TrackedBills() {
                   co_sponsors: coSponsors,
                 };
                 if (party && !bill.sponsor_party) patch.sponsor_party = party;
-                api.entities.Bill.update(bill.id, patch).catch(() => {
-                  /* row may belong to a teammate; overlay still applies */
-                });
+                api.entities.Bill
+                  .update(bill.id, patch, selectedSessionId, state)
+                  .catch(() => {
+                    /* row may belong to a teammate; overlay still applies */
+                  });
               }
             } catch {
               /* non-critical: leave as Unknown, will retry next mount */
@@ -337,7 +364,11 @@ export default function TrackedBills() {
       );
     });
     if (unseenPersonal.length > 0) {
-      api.LcTracking.markBillsSeen(unseenPersonal)
+      api.LcTracking.markBillsSeen(
+        unseenPersonal,
+        selectedSessionId,
+        state,
+      )
         .then(() => {
           queryClient.invalidateQueries({ queryKey: ["lcTracking"] });
         })
@@ -345,47 +376,59 @@ export default function TrackedBills() {
           /* non-critical */
         });
     }
-  }, [effectiveTrackedBillNumbers, lcTrackingMap]);
+  }, [effectiveTrackedBillNumbers, lcTrackingMap, queryClient, selectedSessionId, state]);
 
   // ── Toggle tracking ────────────────────────────────────────────────────────
   const trackMutation = useMutation({
-    mutationFn: (newIds) => api.auth.updateMe({ tracked_bill_ids: newIds }),
-    onMutate: async (newIds) => {
-      await queryClient.cancelQueries({ queryKey: ["profile"] });
-      const previous = queryClient.getQueryData(["profile"]);
-      queryClient.setQueryData(["profile"], (old) =>
-        old ? { ...old, tracked_bill_ids: newIds } : old,
+    mutationFn: (billNumber) =>
+      api.entities.TrackedBill.remove(selectedSessionId, billNumber, state),
+    onMutate: async (billNumber) => {
+      const key = ["trackedBills", state, selectedSessionId];
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData(key);
+      queryClient.setQueryData(key, (old = []) =>
+        old.filter((number) => number !== billNumber),
       );
-      return { previous };
+      return { previous, key };
     },
-    onError: (_err, _newIds, context) => {
-      queryClient.setQueryData(["profile"], context.previous);
+    onError: (_err, _billNumber, context) => {
+      if (context) queryClient.setQueryData(context.key, context.previous);
     },
+    onSettled: () =>
+      queryClient.invalidateQueries({
+        queryKey: ["trackedBills", state, selectedSessionId],
+      }),
   });
 
-  const handleToggleTracking = (billId, billNumber) => {
-    const newTrackedIds = trackedBillIds.filter((id) => id !== billNumber);
-    trackMutation.mutate(newTrackedIds);
-  };
+  const handleToggleTracking = (_billId, billNumber) =>
+    trackMutation.mutate(billNumber);
 
   // ── Personal metadata mutation ─────────────────────────────────────────────
   const metaMutation = useMutation({
     mutationFn: ({ billNumber, fields }) =>
-      api.entities.UserBillMeta.update(billNumber, fields),
+      api.entities.UserBillMeta.update(
+        selectedSessionId,
+        billNumber,
+        fields,
+        state,
+      ),
     onMutate: async ({ billNumber, fields }) => {
-      await queryClient.cancelQueries({ queryKey: ["personalBillMeta"] });
-      const prev = queryClient.getQueryData(["personalBillMeta"]);
-      queryClient.setQueryData(["personalBillMeta"], (old) => ({
+      const key = ["personalBillMeta", state, selectedSessionId];
+      await queryClient.cancelQueries({ queryKey: key });
+      const prev = queryClient.getQueryData(key);
+      queryClient.setQueryData(key, (old) => ({
         ...old,
         [billNumber]: { ...(old?.[billNumber] || {}), ...fields },
       }));
-      return { prev };
+      return { prev, key };
     },
     onError: (_e, _v, ctx) => {
-      queryClient.setQueryData(["personalBillMeta"], ctx.prev);
+      if (ctx) queryClient.setQueryData(ctx.key, ctx.prev);
     },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["personalBillMeta"] });
+      queryClient.invalidateQueries({
+        queryKey: ["personalBillMeta", state, selectedSessionId],
+      });
     },
   });
 
@@ -843,7 +886,11 @@ export default function TrackedBills() {
                               value={meta.bill_summary_notes || ""}
                               onChange={(e) =>
                                 queryClient.setQueryData(
-                                  ["personalBillMeta"],
+                                  [
+                                    "personalBillMeta",
+                                    state,
+                                    selectedSessionId,
+                                  ],
                                   (old) => ({
                                     ...old,
                                     [bill.bill_number]: {

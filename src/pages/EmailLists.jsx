@@ -1,5 +1,9 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "@/api/apiClient";
+import {
+  getSessionDisplayName,
+  useLegislativeSession,
+} from "@/lib/LegislativeSessionContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,6 +27,8 @@ import {
 } from "@/components/ui/dialog";
 
 export default function EmailLists() {
+  const { state, selectedSession, selectedSessionId, isReady } =
+    useLegislativeSession();
   const [emailLists, setEmailLists] = useState([]);
   const [trackedBills, setTrackedBills] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -30,32 +36,73 @@ export default function EmailLists() {
   const [editingList, setEditingList] = useState(null);
   const [isSending, setIsSending] = useState(false);
   const [sentCount, setSentCount] = useState(0);
+  const loadRequestRef = useRef(0);
+  const scopeKey = `${state}:${selectedSessionId ?? "none"}`;
+  const activeScopeRef = useRef(scopeKey);
+  activeScopeRef.current = scopeKey;
+
+  const sessionLabel = getSessionDisplayName(selectedSession);
+
+  const loadData = useCallback(async () => {
+    const originScope = scopeKey;
+    if (activeScopeRef.current !== originScope) return;
+    const requestId = ++loadRequestRef.current;
+
+    // Session-specific bill data must disappear before the replacement request
+    // completes so the new session is never rendered with the old bill list.
+    setTrackedBills([]);
+    setSentCount(0);
+
+    if (!isReady || !selectedSessionId) {
+      setIsLoading(true);
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const [lists, trackedBillNumbers, bills] = await Promise.all([
+        api.entities.EmailList.list("-created_date"),
+        api.entities.TrackedBill.getNumbers(selectedSessionId, state),
+        api.entities.Bill.list(selectedSessionId, undefined, state),
+      ]);
+
+      if (
+        requestId !== loadRequestRef.current ||
+        activeScopeRef.current !== originScope
+      ) {
+        return;
+      }
+
+      setEmailLists(lists);
+      const trackedSet = new Set(trackedBillNumbers);
+      setTrackedBills(
+        bills.filter((bill) => trackedSet.has(bill.bill_number)),
+      );
+    } catch (error) {
+      if (
+        requestId !== loadRequestRef.current ||
+        activeScopeRef.current !== originScope
+      ) {
+        return;
+      }
+      console.error("Error loading data:", error);
+      setTrackedBills([]);
+    } finally {
+      if (
+        requestId === loadRequestRef.current &&
+        activeScopeRef.current === originScope
+      ) {
+        setIsLoading(false);
+      }
+    }
+  }, [isReady, scopeKey, selectedSessionId, state]);
 
   useEffect(() => {
     loadData();
-  }, []);
-
-  const loadData = async () => {
-    setIsLoading(true);
-    try {
-      const [lists, user, bills] = await Promise.all([
-        api.entities.EmailList.list("-created_date"),
-        api.auth.me().catch(() => null),
-        api.entities.Bill.list(),
-      ]);
-
-      setEmailLists(lists);
-      if (user?.tracked_bill_ids) {
-        const filtered = bills.filter((bill) =>
-          user.tracked_bill_ids.includes(bill.bill_number),
-        );
-        setTrackedBills(filtered);
-      }
-    } catch (error) {
-      console.error("Error loading data:", error);
-    }
-    setIsLoading(false);
-  };
+    return () => {
+      loadRequestRef.current += 1;
+    };
+  }, [loadData]);
 
   const sendBillUpdate = async (listId) => {
     const emailList = emailLists.find((list) => list.id === listId);
@@ -72,7 +119,7 @@ export default function EmailLists() {
 
       const emailContent = `Dear Client,
 
-Here's your latest update on tracked Georgia legislative bills:
+Here's your latest update on tracked Georgia legislative bills for ${sessionLabel}:
 
 ${billSummary}
 
@@ -86,7 +133,7 @@ Your Legislative Team`;
         try {
           await api.integrations.Core.SendEmail({
             to: email,
-            subject: `Legislative Update: ${trackedBills.length} Tracked Bills`,
+            subject: `Legislative Update: ${sessionLabel} - ${trackedBills.length} Tracked Bills`,
             body: emailContent,
           });
           successCount++;
@@ -114,7 +161,7 @@ Your Legislative Team`;
             <div>
               <h1 className="text-3xl font-bold text-slate-900">Email Lists</h1>
               <p className="text-slate-600 mt-1">
-                Manage client groups and send bill updates
+                Manage client groups and send bill updates for {sessionLabel}
               </p>
             </div>
           </div>

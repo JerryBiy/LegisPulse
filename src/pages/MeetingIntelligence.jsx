@@ -39,6 +39,8 @@ import {
   Loader2,
 } from "lucide-react";
 import { format } from "date-fns";
+import { useLegislativeSession } from "@/lib/LegislativeSessionContext";
+import { resolveLegisGaSessionMapping } from "@/services/legisGa";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -64,53 +66,99 @@ const statusPill = {
 
 export default function MeetingIntelligence() {
   const queryClient = useQueryClient();
+  const {
+    state,
+    selectedSession,
+    selectedSessionId,
+    isReady,
+  } = useLegislativeSession();
+  const {
+    data: providerSessionMapping,
+    error: providerSessionError,
+    isLoading: providerSessionLoading,
+  } = useQuery({
+    queryKey: ["legisGaSessionMapping", state, selectedSessionId],
+    queryFn: () => resolveLegisGaSessionMapping(selectedSession),
+    enabled: isReady && Boolean(selectedSession),
+    staleTime: 60 * 60 * 1000,
+    retry: 1,
+  });
+  const providerSessionId = providerSessionMapping?.gaSessionId ?? null;
+  const hasProviderSession = Boolean(providerSessionId);
   const [tab, setTab] = useState("live"); // live | history | favorites | alerts
   const [selectedMeetingId, setSelectedMeetingId] = useState(null);
   const [busy, setBusy] = useState(""); // human-readable busy label
   const [error, setError] = useState("");
+  const sessionScopeKey = `${state}:${selectedSessionId ?? "none"}`;
+  const activeSessionScopeRef = useRef(sessionScopeKey);
+  const operationRequestRef = useRef(0);
+  activeSessionScopeRef.current = sessionScopeKey;
 
   // ── Data ───────────────────────────────────────────────────────────────────
-  const { data: userData } = useQuery({
-    queryKey: ["profile"],
-    queryFn: () => api.auth.me().catch(() => null),
+  const { data: trackedBills = [] } = useQuery({
+    queryKey: ["trackedBills", state, selectedSessionId],
+    queryFn: () => api.entities.TrackedBill.getNumbers(selectedSessionId, state),
+    enabled: isReady,
   });
-  const trackedBills = userData?.tracked_bill_ids ?? [];
 
   // Kick a background sync of the upcoming window once on mount.
   useEffect(() => {
+    if (!isReady || !hasProviderSession) return;
     const start = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
     const end = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
-    syncMeetingsRange(start, end)
+    syncMeetingsRange(
+      start,
+      end,
+      selectedSessionId,
+      state,
+      providerSessionId,
+    )
       .then(() => queryClient.invalidateQueries({ queryKey: ["miMeetings"] }))
       .catch(() => {});
-  }, [queryClient]);
+  }, [
+    hasProviderSession,
+    isReady,
+    providerSessionId,
+    queryClient,
+    selectedSessionId,
+    state,
+  ]);
 
   const { data: meetings = [], isLoading: meetingsLoading } = useQuery({
-    queryKey: ["miMeetings"],
+    queryKey: ["miMeetings", state, selectedSessionId, providerSessionId],
     queryFn: () => {
-      const startIso = getSessionStartDate().toISOString();
-      const endIso = new Date(
-        Date.now() + 30 * 24 * 60 * 60 * 1000,
-      ).toISOString();
-      return fetchCachedMeetings(startIso, endIso);
+      const startIso = getSessionStartDate(selectedSession).toISOString();
+      const endYear = Number(selectedSession?.year_end) || new Date().getFullYear();
+      const endIso = new Date(endYear, 11, 31, 23, 59, 59).toISOString();
+      return fetchCachedMeetings(
+        startIso,
+        endIso,
+        selectedSessionId,
+        state,
+        providerSessionId,
+      );
     },
+    enabled: isReady && hasProviderSession,
     refetchInterval: 60000,
   });
 
   const { data: transcripts = [] } = useQuery({
-    queryKey: ["miTranscripts"],
-    queryFn: () => api.meetingIntel.transcripts.list(),
+    queryKey: ["miTranscripts", state, selectedSessionId],
+    queryFn: () =>
+      api.meetingIntel.transcripts.list(selectedSessionId, 200, state),
+    enabled: isReady,
     refetchInterval: 30000,
   });
 
   const { data: favoriteIds = new Set() } = useQuery({
-    queryKey: ["miFavorites"],
+    queryKey: ["miFavorites", state, selectedSessionId],
     queryFn: () => api.meetingIntel.favorites.getIds(),
   });
 
   const { data: alerts = [] } = useQuery({
-    queryKey: ["miAlerts"],
-    queryFn: () => api.meetingIntel.alerts.list(),
+    queryKey: ["miAlerts", state, selectedSessionId],
+    queryFn: () => api.meetingIntel.alerts.list(selectedSessionId, 100, state),
+    enabled: isReady,
     refetchInterval: 30000,
   });
 
@@ -147,8 +195,11 @@ export default function MeetingIntelligence() {
 
   // ── Mutations (imperative helpers) ─────────────────────────────────────────
   const refreshTranscripts = useCallback(
-    () => queryClient.invalidateQueries({ queryKey: ["miTranscripts"] }),
-    [queryClient],
+    () =>
+      queryClient.invalidateQueries({
+        queryKey: ["miTranscripts", state, selectedSessionId],
+      }),
+    [queryClient, selectedSessionId, state],
   );
 
   const handleParseAgenda = useCallback(
@@ -157,13 +208,18 @@ export default function MeetingIntelligence() {
         setError("This meeting has no agenda PDF to parse.");
         return;
       }
+      const requestId = ++operationRequestRef.current;
+      const originScope = sessionScopeKey;
       setError("");
       setBusy("Parsing agenda…");
       try {
         const agendaBills = await parseAgendaBills(meeting.agendaUrl);
-        const t = await api.meetingIntel.transcripts.ensureForMeeting(meeting, {
-          agenda_bills: agendaBills,
-        });
+        const t = await api.meetingIntel.transcripts.ensureForMeeting(
+          meeting,
+          { agenda_bills: agendaBills },
+          selectedSessionId,
+          state,
+        );
         // Tracked-bill matches → agenda alerts
         const matches = matchTrackedBills(agendaBills, trackedBills);
         if (matches.length) {
@@ -174,16 +230,36 @@ export default function MeetingIntelligence() {
               alert_type: "agenda",
               message: `${prettyBill(bn)} is on the agenda for "${meeting.title}".`,
             })),
+            selectedSessionId,
+            state,
           );
           queryClient.invalidateQueries({ queryKey: ["miAlerts"] });
         }
         refreshTranscripts();
       } catch (e) {
-        setError(e?.message || "Failed to parse agenda.");
+        if (
+          requestId === operationRequestRef.current &&
+          originScope === activeSessionScopeRef.current
+        ) {
+          setError(e?.message || "Failed to parse agenda.");
+        }
+      } finally {
+        if (
+          requestId === operationRequestRef.current &&
+          originScope === activeSessionScopeRef.current
+        ) {
+          setBusy("");
+        }
       }
-      setBusy("");
     },
-    [trackedBills, queryClient, refreshTranscripts],
+    [
+      trackedBills,
+      queryClient,
+      refreshTranscripts,
+      selectedSessionId,
+      sessionScopeKey,
+      state,
+    ],
   );
 
   const handleAnalyze = useCallback(
@@ -193,6 +269,8 @@ export default function MeetingIntelligence() {
         setError("There isn't enough transcript text to analyze yet.");
         return;
       }
+      const requestId = ++operationRequestRef.current;
+      const originScope = sessionScopeKey;
       setError("");
       setBusy("Analyzing transcript…");
       try {
@@ -201,11 +279,16 @@ export default function MeetingIntelligence() {
           trackedBills,
           agendaBills: transcript.agenda_bills || [],
         });
-        await api.meetingIntel.transcripts.update(transcript.id, {
-          summary: result.summary,
-          mentioned_bills: result.mentioned_bills,
-          status: transcript.status === "live" ? "live" : "completed",
-        });
+        await api.meetingIntel.transcripts.update(
+          transcript.id,
+          {
+            summary: result.summary,
+            mentioned_bills: result.mentioned_bills,
+            status: transcript.status === "live" ? "live" : "completed",
+          },
+          selectedSessionId,
+          state,
+        );
 
         // Build tracked-bill alerts: mentions + amendments.
         const alertRows = [];
@@ -230,29 +313,71 @@ export default function MeetingIntelligence() {
           }
         }
         if (alertRows.length) {
-          await api.meetingIntel.alerts.createMany(alertRows);
+          await api.meetingIntel.alerts.createMany(
+            alertRows,
+            selectedSessionId,
+            state,
+          );
           queryClient.invalidateQueries({ queryKey: ["miAlerts"] });
         }
         refreshTranscripts();
       } catch (e) {
-        setError(e?.message || "Analysis failed.");
+        if (
+          requestId === operationRequestRef.current &&
+          originScope === activeSessionScopeRef.current
+        ) {
+          setError(e?.message || "Analysis failed.");
+        }
+      } finally {
+        if (
+          requestId === operationRequestRef.current &&
+          originScope === activeSessionScopeRef.current
+        ) {
+          setBusy("");
+        }
       }
-      setBusy("");
     },
-    [trackedBills, trackedKeySet, queryClient, refreshTranscripts],
+    [
+      trackedBills,
+      trackedKeySet,
+      queryClient,
+      refreshTranscripts,
+      selectedSessionId,
+      sessionScopeKey,
+      state,
+    ],
   );
 
   const handleToggleFavorite = useCallback(
     async (meeting) => {
       const t =
         transcriptByMeeting.get(meeting.id) ||
-        (await api.meetingIntel.transcripts.ensureForMeeting(meeting));
+        (await api.meetingIntel.transcripts.ensureForMeeting(
+          meeting,
+          {},
+          selectedSessionId,
+          state,
+        ));
       await api.meetingIntel.favorites.toggle(t.id);
       queryClient.invalidateQueries({ queryKey: ["miFavorites"] });
       refreshTranscripts();
     },
-    [transcriptByMeeting, queryClient, refreshTranscripts],
+    [
+      transcriptByMeeting,
+      queryClient,
+      refreshTranscripts,
+      selectedSessionId,
+      state,
+    ],
   );
+
+  useEffect(() => {
+    operationRequestRef.current += 1;
+    setSelectedMeetingId(null);
+    setTab("live");
+    setError("");
+    setBusy("");
+  }, [selectedSessionId, state]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
   const unseenAlerts = alerts.filter((a) => !a.seen).length;
@@ -260,6 +385,7 @@ export default function MeetingIntelligence() {
   if (selectedMeeting) {
     return (
       <MeetingDetail
+        key={`${sessionScopeKey}:${selectedMeeting.id}`}
         meeting={selectedMeeting}
         transcript={selectedTranscript}
         trackedBills={trackedBills}
@@ -277,8 +403,9 @@ export default function MeetingIntelligence() {
         onAnalyze={() => handleAnalyze(selectedMeeting, selectedTranscript)}
         onToggleFavorite={() => handleToggleFavorite(selectedMeeting)}
         onTranscriptChanged={refreshTranscripts}
-        setBusy={setBusy}
         setError={setError}
+        sessionId={selectedSessionId}
+        state={state}
       />
     );
   }
@@ -338,6 +465,13 @@ export default function MeetingIntelligence() {
           </div>
         )}
 
+        {providerSessionError && (
+          <div className="text-sm text-amber-950 bg-amber-50 border border-amber-300 rounded-lg p-3">
+            Official meeting data is unavailable because this session could not
+            be matched safely to the Georgia Legislature. {providerSessionError.message}
+          </div>
+        )}
+
         {/* Content */}
         {tab === "alerts" ? (
           <AlertsList
@@ -348,12 +482,16 @@ export default function MeetingIntelligence() {
             onMarkAllSeen={async () => {
               const ids = alerts.filter((a) => !a.seen).map((a) => a.id);
               if (ids.length) {
-                await api.meetingIntel.alerts.markSeen(ids);
+                await api.meetingIntel.alerts.markSeen(
+                  ids,
+                  selectedSessionId,
+                  state,
+                );
                 queryClient.invalidateQueries({ queryKey: ["miAlerts"] });
               }
             }}
           />
-        ) : meetingsLoading ? (
+        ) : meetingsLoading || providerSessionLoading ? (
           <div className="text-center py-12">
             <Loader2 className="w-8 h-8 text-blue-600 mx-auto animate-spin" />
             <p className="mt-3 text-slate-600">Loading meetings…</p>
@@ -653,16 +791,23 @@ function MeetingDetail({
   onAnalyze,
   onToggleFavorite,
   onTranscriptChanged,
-  setBusy,
   setError,
+  sessionId,
+  state,
 }) {
   const queryClient = useQueryClient();
   const [capturing, setCapturing] = useState(false);
+  const [startingCapture, setStartingCapture] = useState(false);
+  const [finalizingCapture, setFinalizingCapture] = useState(false);
   const [ytUrl, setYtUrl] = useState(
     /youtu\.?be/i.test(meeting.videoUrl || "") ? meeting.videoUrl : "",
   );
   const [requesting, setRequesting] = useState(false);
   const captureRef = useRef(null);
+  const capturePendingRef = useRef(false);
+  const captureStoppingRef = useRef(false);
+  const captureFinalizationRef = useRef(null);
+  const activeRef = useRef(true);
   const seqRef = useRef(0);
   const transcriptIdRef = useRef(transcript?.id || null);
   const textRef = useRef(transcript?.transcript_text || "");
@@ -699,29 +844,113 @@ function MeetingDetail({
   }, [transcript?.id, queryClient]);
 
   // Stop capture when leaving the detail view.
-  useEffect(
-    () => () => {
-      captureRef.current?.stop?.();
-    },
-    [],
-  );
+  useEffect(() => {
+    activeRef.current = true;
+    return () => {
+      activeRef.current = false;
+      const controller = captureRef.current;
+      captureRef.current = null;
+      controller?.stop?.();
+    };
+  }, []);
 
   const startCapture = async () => {
+    if (
+      capturePendingRef.current ||
+      captureStoppingRef.current ||
+      captureFinalizationRef.current ||
+      capturing
+    ) {
+      return;
+    }
+    capturePendingRef.current = true;
+    setStartingCapture(true);
     setError("");
     try {
       // Ensure a transcript row exists and mark it live.
-      const t = await api.meetingIntel.transcripts.ensureForMeeting(meeting, {
-        status: "live",
-      });
+      const t = await api.meetingIntel.transcripts.ensureForMeeting(
+        meeting,
+        {},
+        sessionId,
+        state,
+      );
+      if (!activeRef.current) return;
       transcriptIdRef.current = t.id;
       textRef.current = t.transcript_text || "";
       seqRef.current = (await api.meetingIntel.segments.list(t.id)).length;
+      if (!activeRef.current) return;
       onTranscriptChanged();
 
+      let captureStopped = false;
+      let captureMarkedLive = false;
+      let finalizationPromise = null;
+      const completeCapture = async () => {
+        let lastError;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            await api.meetingIntel.transcripts.update(
+              t.id,
+              { status: "completed" },
+              sessionId,
+              state,
+            );
+            return;
+          } catch (completionError) {
+            lastError = completionError;
+            if (attempt < 2) {
+              await new Promise((resolve) =>
+                setTimeout(resolve, 250 * (attempt + 1)),
+              );
+            }
+          }
+        }
+        throw lastError;
+      };
+      const finalizeCapture = () => {
+        captureStopped = true;
+        if (!captureMarkedLive) {
+          captureStoppingRef.current = false;
+          if (activeRef.current) {
+            setCapturing(false);
+            setFinalizingCapture(false);
+          }
+          return Promise.resolve();
+        }
+        if (finalizationPromise) return finalizationPromise;
+
+        captureStoppingRef.current = true;
+        if (activeRef.current) {
+          setCapturing(false);
+          setFinalizingCapture(true);
+        }
+        const task = completeCapture()
+          .then(() => {
+            if (activeRef.current) onTranscriptChanged();
+          })
+          .catch((completionError) => {
+            console.error("Could not finalize attended capture", completionError);
+            if (activeRef.current) {
+              setError(
+                "Capture stopped, but its transcript status could not be finalized. Please retry shortly.",
+              );
+            }
+          })
+          .finally(() => {
+            if (captureFinalizationRef.current === task) {
+              captureFinalizationRef.current = null;
+            }
+            captureStoppingRef.current = false;
+            if (activeRef.current) setFinalizingCapture(false);
+          });
+        finalizationPromise = task;
+        captureFinalizationRef.current = task;
+        return task;
+      };
+      let managedController = null;
       const controller = await startTabAudioTranscription({
         windowMs: 20000,
         onSegment: async (text) => {
-          if (!text) return;
+          if (!text || !activeRef.current) return;
           seqRef.current += 1;
           textRef.current = `${textRef.current} ${text}`.trim();
           try {
@@ -729,9 +958,13 @@ function MeetingDetail({
               seq: seqRef.current,
               text,
             });
-            await api.meetingIntel.transcripts.update(transcriptIdRef.current, {
-              transcript_text: textRef.current,
-            });
+            await api.meetingIntel.transcripts.update(
+              transcriptIdRef.current,
+              { transcript_text: textRef.current },
+              sessionId,
+              state,
+            );
+            if (!activeRef.current) return;
             queryClient.invalidateQueries({
               queryKey: ["miSegments", transcriptIdRef.current],
             });
@@ -740,26 +973,74 @@ function MeetingDetail({
             console.warn("segment save failed", e);
           }
         },
-        onError: (e) => setError(e.message),
+        onError: (e) => {
+          if (activeRef.current) setError(e.message);
+        },
         onStop: () => {
-          setCapturing(false);
-          api.meetingIntel.transcripts
-            .update(transcriptIdRef.current, { status: "completed" })
-            .then(onTranscriptChanged)
-            .catch(() => {});
+          if (captureRef.current === managedController) {
+            captureRef.current = null;
+          }
+          void finalizeCapture();
         },
       });
-      captureRef.current = controller;
+      let stopRequested = false;
+      managedController = {
+        stop: () => {
+          if (stopRequested) {
+            void finalizeCapture();
+            return;
+          }
+          stopRequested = true;
+          captureStoppingRef.current = true;
+          if (activeRef.current) {
+            setCapturing(false);
+            setFinalizingCapture(captureMarkedLive);
+          }
+          try {
+            controller?.stop?.();
+          } finally {
+            void finalizeCapture();
+          }
+        },
+      };
+      if (!activeRef.current || captureStopped) {
+        managedController.stop();
+        return;
+      }
+      captureRef.current = managedController;
+      await api.meetingIntel.transcripts.update(
+        t.id,
+        { status: "live" },
+        sessionId,
+        state,
+      );
+      captureMarkedLive = true;
+      if (!activeRef.current || captureStopped) {
+        managedController.stop();
+        if (captureRef.current === managedController) captureRef.current = null;
+        await finalizeCapture();
+        return;
+      }
       setCapturing(true);
     } catch (e) {
-      setError(e?.message || "Could not start capture.");
+      const controller = captureRef.current;
+      captureRef.current = null;
+      controller?.stop?.();
+      if (!activeRef.current) {
+        console.error("Attended capture startup failed", e);
+      }
+      if (activeRef.current) {
+        setError(e?.message || "Could not start capture.");
+      }
+    } finally {
+      capturePendingRef.current = false;
+      if (activeRef.current) setStartingCapture(false);
     }
   };
 
   const stopCapture = () => {
     captureRef.current?.stop?.();
     captureRef.current = null;
-    setCapturing(false);
   };
 
   const requestLiveMonitor = async () => {
@@ -770,12 +1051,19 @@ function MeetingDetail({
     setError("");
     setRequesting(true);
     try {
-      await api.meetingIntel.transcripts.requestMonitor(meeting, ytUrl.trim());
-      onTranscriptChanged();
+      await api.meetingIntel.transcripts.requestMonitor(
+        meeting,
+        ytUrl.trim(),
+        sessionId,
+        state,
+      );
+      if (activeRef.current) onTranscriptChanged();
     } catch (e) {
-      setError(e?.message || "Could not request monitoring.");
+      if (activeRef.current) {
+        setError(e?.message || "Could not request monitoring.");
+      }
     }
-    setRequesting(false);
+    if (activeRef.current) setRequesting(false);
   };
 
   const monitorStatus = transcript?.status;
@@ -884,9 +1172,22 @@ function MeetingDetail({
               </p>
             ) : !capturing ? (
               <div className="flex items-center gap-2 flex-wrap">
-                <Button onClick={startCapture} className="bg-red-600 hover:bg-red-700 gap-2">
-                  <Radio className="w-4 h-4" /> Start capturing tab audio
-                </Button>
+                 <Button
+                   onClick={startCapture}
+                   disabled={startingCapture || finalizingCapture}
+                   className="bg-red-600 hover:bg-red-700 gap-2"
+                 >
+                   {startingCapture || finalizingCapture ? (
+                     <Loader2 className="w-4 h-4 animate-spin" />
+                   ) : (
+                     <Radio className="w-4 h-4" />
+                   )}
+                   {finalizingCapture
+                     ? "Finalizing capture..."
+                     : startingCapture
+                       ? "Waiting for shared tab..."
+                       : "Start capturing tab audio"}
+                 </Button>
                 <p className="text-xs text-slate-500">
                   Pick the meeting's video tab and enable “Share tab audio”.
                 </p>
