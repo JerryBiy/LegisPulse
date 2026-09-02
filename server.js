@@ -4,6 +4,7 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runLcRecheck, startLcRecheckScheduler } from "./server/lcRecheck.js";
+import { runXFeedSync, startXFeedScheduler } from "./server/xFeedSync.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const DIST = join(__dirname, "dist");
@@ -147,6 +148,33 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // Manual / external trigger for the official X early-alert collector.
+  // Protected by x-x-sync-secret when X_SYNC_SECRET is configured.
+  if (pathname === "/api/x-feed-sync") {
+    if (req.method !== "POST") {
+      res.writeHead(405, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Method Not Allowed" }));
+      return;
+    }
+    const expected = process.env.X_SYNC_SECRET;
+    if (expected && req.headers["x-x-sync-secret"] !== expected) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+    runXFeedSync()
+      .then((summary) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(summary));
+      })
+      .catch((error) => {
+        console.error("[x-feed] HTTP run failed:", error.message);
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: error.message }));
+      });
+    return;
+  }
+
   // Try exact path first
   const filePath = join(DIST, pathname);
   if (serveFile(filePath, res)) return;
@@ -162,4 +190,5 @@ const server = createServer((req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Static server running on port ${PORT}`);
   startLcRecheckScheduler();
+  startXFeedScheduler();
 });

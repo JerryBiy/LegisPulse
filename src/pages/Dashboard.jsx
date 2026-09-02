@@ -491,65 +491,6 @@ export default function Dashboard() {
       sessionId,
       trackedKey: ["trackedBills", scopeState, sessionId],
     });
-    if (!isCurrentlyTracked) {
-      monitorBillOnTwitter(bill);
-    }
-  };
-
-  const monitorBillOnTwitter = async (bill) => {
-    const billNumber = bill.bill_number;
-    try {
-      // Search for recent tweets mentioning the bill
-      await api.integrations.Core.InvokeLLM({
-        prompt: `Search Twitter/X for recent posts from @GeorgiaHouseofReps and @Georgia_Senate about this exact bill:
-        State: ${state}
-        Session: ${getSessionDisplayName(selectedSession)} (LegiScan session_id ${selectedSessionId})
-        Bill: ${billNumber}
-        Title: ${bill.title || "Untitled"}
-        LegiScan bill_id: ${bill.legiscan_id || "unknown"}
-        Source URL: ${bill.state_link || bill.url || "not provided"}
-
-        Do not return posts about a same-numbered bill from any other session.
-        Look for any updates, votes, committee actions, or status changes related to this bill.
-        Return the most relevant information about recent activity.`,
-        add_context_from_internet: true,
-        response_json_schema: {
-          type: "object",
-          properties: {
-            has_updates: { type: "boolean" },
-            updates: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  content: { type: "string" },
-                  date: { type: "string" },
-                  source: { type: "string" },
-                },
-              },
-            },
-          },
-        },
-      }).then(async (response) => {
-        if (response.has_updates && response.updates?.length > 0) {
-          // Create notification for user
-          await api.entities.Notification.create(
-            {
-              notification_type: "bill_mention",
-              title: `${billNumber} mentioned on Twitter`,
-              message: response.updates[0].content,
-              related_bill_id: billNumber,
-              legiscan_id: bill.legiscan_id,
-              priority: "high",
-            },
-            selectedSessionId,
-            state,
-          );
-        }
-      });
-    } catch (error) {
-      console.error("Error monitoring bill on Twitter:", error);
-    }
   };
 
   const handleBillUpdate = useCallback(

@@ -8,7 +8,7 @@ import MeetingIntelligence from "./pages/MeetingIntelligence";
 import Settings from "./pages/Settings";
 import Team from "./pages/Team";
 import TrackedBills from "./pages/TrackedBills";
-import TwitterFeed from "./pages/TwitterFeed";
+import XFeed from "./pages/XFeed";
 import __Layout from "./Layout.jsx";
 
 export const PAGES = {
@@ -22,7 +22,9 @@ export const PAGES = {
   Settings: Settings,
   Team: Team,
   TrackedBills: TrackedBills,
-  TwitterFeed: TwitterFeed,
+  XFeed: XFeed,
+  // Preserve existing bookmarks while the visible route moves to /xfeed.
+  TwitterFeed: XFeed,
 };
 
 export const pagesConfig = {

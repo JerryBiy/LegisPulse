@@ -1,4 +1,4 @@
-import React, {
+import {
   useCallback,
   useEffect,
   useMemo,
@@ -9,112 +9,130 @@ import { api } from "@/api/apiClient";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import XIcon from "@/components/icons/XIcon";
 import {
-  Twitter,
   ExternalLink,
   Heart,
   Repeat2,
   MessageCircle,
   AlertCircle,
   RefreshCw,
+  Radio,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
 
-export default function TwitterFeed({
+const MOVEMENT_LABELS = {
+  introduced: "Introduced",
+  assigned_to_committee: "Assigned to Committee",
+  committee_hearing: "Committee Hearing",
+  passed_committee: "Passed Committee",
+  passed_by_substitute: "Passed by Substitute",
+  amended: "Amended",
+  passed_house: "Passed House",
+  passed_senate: "Passed Senate",
+  failed: "Failed / Did Not Pass",
+  sent_to_governor: "Sent to Governor",
+  signed: "Signed",
+  vetoed: "Vetoed",
+};
+
+export default function XFeed({
   state = "GA",
   sessionId,
   trackedBillNumbers = [],
-  trackedLegiscanIds = [],
-  showAllTweets = false,
+  showAllPosts = false,
 }) {
-  const [tweets, setTweets] = useState([]);
+  const [posts, setPosts] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const requestIdRef = useRef(0);
 
-  const loadTweets = useCallback(async () => {
+  const loadPosts = useCallback(async () => {
     const requestId = ++requestIdRef.current;
     if (!sessionId) {
-      setTweets([]);
+      setPosts([]);
       setIsLoading(false);
       return;
     }
     setIsLoading(true);
     try {
-      const tweetsData = await api.entities.Tweet.list(
+      const postsData = await api.entities.XPost.list(
         sessionId,
         "-posted_at",
         50,
         state,
       );
       if (requestId !== requestIdRef.current) return;
-      setTweets(tweetsData);
+      setPosts(postsData);
     } catch (error) {
       if (requestId !== requestIdRef.current) return;
-      console.error("Error loading tweets:", error);
+      console.error("Error loading X posts:", error);
+      setPosts([]);
     }
     if (requestId === requestIdRef.current) setIsLoading(false);
   }, [sessionId, state]);
 
   useEffect(() => {
-    setTweets([]);
-    loadTweets();
+    setPosts([]);
+    loadPosts();
     return () => {
       requestIdRef.current += 1;
     };
-  }, [loadTweets]);
+  }, [loadPosts]);
 
-  const filteredTweets = useMemo(() => {
-    if (showAllTweets) return tweets;
-    const numberSet = new Set(
-      trackedBillNumbers.map((number) =>
-        String(number || "")
-          .toUpperCase()
-          .replace(/\s+/g, ""),
+  const normalizedTrackedBills = useMemo(
+    () =>
+      new Set(
+        trackedBillNumbers.map((number) =>
+          String(number || "")
+            .toUpperCase()
+            .replace(/\s+/g, ""),
+        ),
       ),
-    );
-    const legiscanIdSet = new Set(trackedLegiscanIds.map(String));
-    if (numberSet.size === 0 && legiscanIdSet.size === 0) return [];
-    return tweets.filter((tweet) => {
-      const numberMatch = tweet.related_bills?.some((billNumber) =>
-        numberSet.has(
+    [trackedBillNumbers],
+  );
+
+  const filteredPosts = useMemo(() => {
+    if (showAllPosts) return posts;
+    if (normalizedTrackedBills.size === 0) return [];
+    return posts.filter((post) =>
+      post.related_bills?.some((billNumber) =>
+        normalizedTrackedBills.has(
           String(billNumber || "")
             .toUpperCase()
             .replace(/\s+/g, ""),
         ),
-      );
-      const idMatch = tweet.related_legiscan_ids?.some((id) =>
-        legiscanIdSet.has(String(id)),
-      );
-      return numberMatch || idMatch;
-    });
-  }, [showAllTweets, trackedBillNumbers, trackedLegiscanIds, tweets]);
+      ),
+    );
+  }, [normalizedTrackedBills, posts, showAllPosts]);
 
   const getBillBadgeColor = (billNumber) => {
     if (billNumber.startsWith("HB")) {
       return "bg-blue-100 text-blue-800 border-blue-200";
-    } else if (billNumber.startsWith("SB")) {
+    }
+    if (billNumber.startsWith("SB")) {
       return "bg-purple-100 text-purple-800 border-purple-200";
-    } else if (billNumber.startsWith("HR")) {
+    }
+    if (billNumber.startsWith("HR")) {
       return "bg-indigo-100 text-indigo-800 border-indigo-200";
     }
-    return "bg-gray-100 text-gray-800 border-gray-200";
+    return "bg-slate-100 text-slate-800 border-slate-200";
   };
 
   const getAccountColor = (handle) => {
-    if (handle === "@GeorgiaHouseofReps") {
+    if (String(handle).toLowerCase().includes("house")) {
       return {
         bg: "bg-blue-50",
         border: "border-blue-200",
         text: "text-blue-700",
-        icon: "text-blue-600",
+        icon: "text-blue-700",
       };
     }
     return {
       bg: "bg-purple-50",
       border: "border-purple-200",
       text: "text-purple-700",
-      icon: "text-purple-600",
+      icon: "text-purple-700",
     };
   };
 
@@ -122,155 +140,171 @@ export default function TwitterFeed({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Twitter className="w-5 h-5 text-blue-500" />
+          <XIcon className="h-5 w-5 text-slate-950" />
           <h3 className="font-semibold text-slate-900">
-            {showAllTweets
-              ? "Official Legislative Updates"
-              : "Tracked Bill Mentions"}
+            {showAllPosts ? "Official Legislative Posts" : "My Bill Alerts"}
           </h3>
         </div>
         <Button
           variant="outline"
           size="sm"
-          onClick={loadTweets}
+          onClick={loadPosts}
+          disabled={isLoading}
           className="gap-2"
         >
-          <RefreshCw className="w-4 h-4" />
+          <RefreshCw className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`} />
           Refresh
         </Button>
       </div>
 
-      {!showAllTweets &&
-        trackedBillNumbers.length === 0 &&
-        trackedLegiscanIds.length === 0 && (
-          <Card className="border-dashed">
-            <CardContent className="p-8 text-center">
-              <AlertCircle className="w-12 h-12 text-slate-400 mx-auto mb-3" />
-              <h4 className="font-semibold text-slate-900 mb-2">
-                No Tracked Bills
-              </h4>
-              <p className="text-sm text-slate-600">
-                Start tracking bills to see Twitter mentions from official GA
-                Legislature accounts
-              </p>
-            </CardContent>
-          </Card>
-        )}
+      {!showAllPosts && normalizedTrackedBills.size === 0 && (
+        <Card className="border-dashed">
+          <CardContent className="p-8 text-center">
+            <AlertCircle className="mx-auto mb-3 h-12 w-12 text-slate-400" />
+            <h4 className="mb-2 font-semibold text-slate-900">
+              No Personal or Team Bills
+            </h4>
+            <p className="text-sm text-slate-600">
+              Track a bill personally or add it to a team to receive matching X
+              early alerts.
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       {isLoading ? (
         <div className="space-y-4">
-          {[1, 2, 3].map((i) => (
-            <Card key={i} className="animate-pulse">
+          {[1, 2, 3].map((item) => (
+            <Card key={item} className="animate-pulse">
               <CardContent className="p-6">
-                <div className="h-4 bg-slate-200 rounded w-3/4 mb-3"></div>
-                <div className="h-3 bg-slate-200 rounded w-full mb-2"></div>
-                <div className="h-3 bg-slate-200 rounded w-5/6"></div>
+                <div className="mb-3 h-4 w-3/4 rounded bg-slate-200" />
+                <div className="mb-2 h-3 w-full rounded bg-slate-200" />
+                <div className="h-3 w-5/6 rounded bg-slate-200" />
               </CardContent>
             </Card>
           ))}
         </div>
-      ) : filteredTweets.length > 0 ? (
+      ) : filteredPosts.length > 0 ? (
         <div className="space-y-4">
           <AnimatePresence>
-            {filteredTweets.map((tweet) => {
-              const colors = getAccountColor(tweet.account_handle);
+            {filteredPosts.map((post) => {
+              const colors = getAccountColor(post.account_handle);
+              const movementsByBill = new Map();
+              for (const movement of post.movements ?? []) {
+                if (!movementsByBill.has(movement.bill_ref)) {
+                  movementsByBill.set(movement.bill_ref, []);
+                }
+                movementsByBill.get(movement.bill_ref).push(movement);
+              }
               return (
                 <motion.div
-                  key={tweet.id}
-                  initial={{ opacity: 0, y: 20 }}
+                  key={post.id}
+                  initial={{ opacity: 0, y: 12 }}
                   animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -20 }}
+                  exit={{ opacity: 0, y: -12 }}
                 >
                   <Card
-                    className={`border ${colors.border} ${colors.bg} hover:shadow-md transition-shadow`}
+                    className={`border ${colors.border} ${colors.bg} transition-shadow hover:shadow-md`}
                   >
                     <CardHeader className="pb-3">
-                      <div className="flex items-start justify-between">
+                      <div className="flex items-start justify-between gap-4">
                         <div className="flex items-center gap-3">
-                          <div className="p-2 bg-white rounded-full shadow-sm">
-                            <Twitter className={`w-4 h-4 ${colors.icon}`} />
+                          <div className="rounded-full bg-white p-2 shadow-sm">
+                            <XIcon className={`h-4 w-4 ${colors.icon}`} />
                           </div>
                           <div>
                             <h4 className={`font-bold ${colors.text}`}>
-                              {tweet.account_name || tweet.account_handle}
+                              {post.account_name || post.account_handle}
                             </h4>
-                            <p className="text-sm text-slate-500 font-medium">
-                              {tweet.account_handle}
+                            <p className="text-sm font-medium text-slate-500">
+                              {post.account_handle}
                             </p>
                           </div>
                         </div>
-                        <span className="text-xs text-slate-500">
-                          {formatDistanceToNow(new Date(tweet.posted_at), {
+                        <span className="shrink-0 text-xs text-slate-500">
+                          {formatDistanceToNow(new Date(post.posted_at), {
                             addSuffix: true,
                           })}
                         </span>
                       </div>
                     </CardHeader>
                     <CardContent className="space-y-4">
-                      <p className="text-slate-800 leading-relaxed">
-                        {tweet.content}
+                      <p className="whitespace-pre-line leading-relaxed text-slate-800">
+                        {post.content}
                       </p>
 
-                      {tweet.related_bills &&
-                        tweet.related_bills.length > 0 && (
-                          <div className="flex flex-wrap gap-2">
-                            {tweet.related_bills.map((billNum, idx) => (
+                      {post.related_bills?.length > 0 && (
+                        <div className="space-y-2">
+                          {post.related_bills.map((billNumber) => (
+                            <div
+                              key={billNumber}
+                              className="flex flex-wrap items-center gap-2"
+                            >
                               <Badge
-                                key={idx}
                                 variant="outline"
-                                className={getBillBadgeColor(billNum)}
+                                className={getBillBadgeColor(billNumber)}
                               >
-                                {billNum}
+                                {billNumber}
                               </Badge>
-                            ))}
-                          </div>
-                        )}
+                              {(movementsByBill.get(billNumber) ?? []).map(
+                                (movement) => (
+                                  <Badge
+                                    key={`${billNumber}:${movement.movement_type}`}
+                                    className="border-amber-200 bg-amber-100 text-amber-900"
+                                    variant="outline"
+                                  >
+                                    <Radio className="mr-1 h-3 w-3" />
+                                    {MOVEMENT_LABELS[movement.movement_type] ||
+                                      movement.movement_type}
+                                  </Badge>
+                                ),
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
 
-                      {tweet.media_urls && tweet.media_urls.length > 0 && (
-                        <div className="grid grid-cols-2 gap-2">
-                          {tweet.media_urls.map((url, idx) => (
+                      {post.media_urls?.length > 0 && (
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          {post.media_urls.map((url) => (
                             <img
-                              key={idx}
+                              key={url}
                               src={url}
-                              alt="Tweet media"
-                              className="rounded-lg w-full h-32 object-cover border border-slate-200"
+                              alt="Media attached to the X post"
+                              className="h-36 w-full rounded-lg border border-slate-200 object-cover"
                             />
                           ))}
                         </div>
                       )}
 
-                      <div className="flex items-center justify-between pt-3 border-t border-slate-200">
-                        <div className="flex items-center gap-6 text-sm text-slate-600">
-                          {tweet.engagement && (
-                            <>
-                              <div className="flex items-center gap-1">
-                                <MessageCircle className="w-4 h-4" />
-                                <span>{tweet.engagement.replies || 0}</span>
-                              </div>
-                              <div className="flex items-center gap-1">
-                                <Repeat2 className="w-4 h-4" />
-                                <span>{tweet.engagement.retweets || 0}</span>
-                              </div>
-                              <div className="flex items-center gap-1">
-                                <Heart className="w-4 h-4" />
-                                <span>{tweet.engagement.likes || 0}</span>
-                              </div>
-                            </>
-                          )}
+                      <div className="flex items-center justify-between border-t border-slate-200 pt-3">
+                        <div className="flex items-center gap-5 text-sm text-slate-600">
+                          <div className="flex items-center gap-1">
+                            <MessageCircle className="h-4 w-4" />
+                            <span>{post.engagement?.replies || 0}</span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <Repeat2 className="h-4 w-4" />
+                            <span>{post.engagement?.reposts || 0}</span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <Heart className="h-4 w-4" />
+                            <span>{post.engagement?.likes || 0}</span>
+                          </div>
                         </div>
-                        {tweet.tweet_url && (
+                        {post.x_url && (
                           <Button
                             variant="ghost"
                             size="sm"
                             asChild
-                            className="text-blue-600 hover:text-blue-700"
+                            className="text-slate-700 hover:text-slate-950"
                           >
                             <a
-                              href={tweet.tweet_url}
+                              href={post.x_url}
                               target="_blank"
                               rel="noopener noreferrer"
                             >
-                              <ExternalLink className="w-4 h-4 mr-1" />
+                              <ExternalLink className="mr-1 h-4 w-4" />
                               View on X
                             </a>
                           </Button>
@@ -283,17 +317,26 @@ export default function TwitterFeed({
             })}
           </AnimatePresence>
         </div>
-      ) : !isLoading && showAllTweets ? (
+      ) : (
         <Card className="border-dashed">
           <CardContent className="p-8 text-center">
-            <Twitter className="w-12 h-12 text-slate-400 mx-auto mb-3" />
-            <h4 className="font-semibold text-slate-900 mb-2">No Tweets Yet</h4>
+            <XIcon className="mx-auto mb-3 h-12 w-12 text-slate-400" />
+            <h4 className="mb-2 font-semibold text-slate-900">
+              {showAllPosts ? "No X Posts Yet" : "No Matching Bill Alerts Yet"}
+            </h4>
             <p className="text-sm text-slate-600">
-              Official legislative tweets will appear here when available
+              {showAllPosts
+                ? "Official Georgia legislative posts for this session will appear here."
+                : "New official posts about your personal or team bills will appear here."}
             </p>
           </CardContent>
         </Card>
-      ) : null}
+      )}
+
+      <p className="text-center text-xs text-slate-500">
+        X detections are early alerts. LegiScan and official legislative records
+        remain the source of truth for bill status.
+      </p>
     </div>
   );
 }

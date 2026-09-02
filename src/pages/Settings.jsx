@@ -661,11 +661,11 @@ export default function Settings() {
                   htmlFor="twitter_notifications"
                   className="text-base font-semibold"
                 >
-                  Twitter/X Mentions
+                  X Bill-Movement Early Alerts
                 </Label>
                 <p className="text-sm text-slate-600 mt-1">
-                  Get alerts for mentions of tracked bills from monitored
-                  accounts.
+                  Notify me when an official Georgia legislative X account
+                  reports meaningful movement on a personal or team bill.
                 </p>
               </div>
               <Switch

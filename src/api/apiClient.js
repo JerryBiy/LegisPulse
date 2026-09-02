@@ -803,9 +803,26 @@ export const api = {
           .eq("user_id", userId)
           .eq("state", state)
           .eq("session_id", sid)
+          .order("created_date", { ascending: false })
           .limit(limit);
         if (error) throw error;
         return sortByField(data ?? [], sortKey).map(this._fromRow);
+      },
+
+      async getUnreadCount(sessionId, state = DEFAULT_STATE, type = null) {
+        const userId = await getUserId();
+        const sid = requireSessionId(sessionId);
+        let query = supabase
+          .from("notifications")
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", userId)
+          .eq("state", state)
+          .eq("session_id", sid)
+          .eq("read", false);
+        if (type) query = query.eq("type", type);
+        const { count, error } = await query;
+        if (error) throw error;
+        return count ?? 0;
       },
 
       async create(payload, sessionId, state = DEFAULT_STATE) {
@@ -955,6 +972,82 @@ export const api = {
           .limit(limit);
         if (error) throw error;
         return sortByField(data ?? [], sortKey).map(this._fromRow);
+      },
+    },
+
+    /** Shared official X posts. X is an early signal, never bill status truth. */
+    XPost: {
+      async list(
+        sessionId,
+        sortKey = "-posted_at",
+        limit = 50,
+        state = DEFAULT_STATE,
+      ) {
+        const sid = requireSessionId(sessionId);
+        const { data: posts, error: postError } = await supabase
+          .from("x_posts")
+          .select(
+            "state, session_id, post_id, account_id, account_name, account_handle, content, posted_at, post_url, related_bill_numbers, media_urls, engagement, ingested_at",
+          )
+          .eq("state", state)
+          .eq("session_id", sid)
+          .order("posted_at", { ascending: false, nullsFirst: false })
+          .limit(limit);
+        if (postError) throw postError;
+
+        const postIds = (posts ?? []).map((post) => post.post_id);
+        let movements = [];
+        if (postIds.length > 0) {
+          const { data, error } = await supabase
+            .from("x_bill_movements")
+            .select(
+              "post_id, bill_type, bill_number, bill_ref, movement_type, confidence, evidence, detected_at",
+            )
+            .eq("state", state)
+            .eq("session_id", sid)
+            .in("post_id", postIds);
+          if (error) throw error;
+          movements = data ?? [];
+        }
+
+        const movementMap = new Map();
+        for (const movement of movements) {
+          if (!movementMap.has(movement.post_id)) {
+            movementMap.set(movement.post_id, []);
+          }
+          movementMap.get(movement.post_id).push(movement);
+        }
+
+        return sortByField(posts ?? [], sortKey).map((post) => {
+          const metrics = post.engagement ?? {};
+          return {
+            ...post,
+            id: post.post_id,
+            related_bills: (post.related_bill_numbers ?? [])
+              .map(normalizeBillNumber)
+              .filter(Boolean),
+            movements: movementMap.get(post.post_id) ?? [],
+            media_urls: post.media_urls ?? [],
+            engagement: {
+              replies: metrics.reply_count ?? metrics.replies ?? 0,
+              reposts: metrics.retweet_count ?? metrics.reposts ?? 0,
+              likes: metrics.like_count ?? metrics.likes ?? 0,
+            },
+            x_url: post.post_url,
+          };
+        });
+      },
+
+      async getSyncStatus(state = DEFAULT_STATE) {
+        const { data, error } = await supabase
+          .from("x_feed_sync_state")
+          .select(
+            "state, monitored_handles, last_attempt_at, last_success_at, last_error, fetched_count, matched_count, notified_count, updated_at",
+          )
+          .eq("state", state)
+          .maybeSingle();
+        if (error) throw error;
+        return data ?? null;
       },
     },
 

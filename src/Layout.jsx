@@ -9,7 +9,6 @@ import {
   Mail,
   Building2,
   Bell,
-  Twitter,
   Settings,
   LogOut,
   Users,
@@ -35,6 +34,13 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Badge } from "@/components/ui/badge";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import XIcon from "@/components/icons/XIcon";
+import NotificationCenter from "@/components/notifications/NotificationCenter";
 import SessionSelector from "@/components/legislative/SessionSelector";
 import {
   getSessionDisplayName,
@@ -85,10 +91,10 @@ const navigationItems = [
     description: "Compare Bill Versions & Substitutes",
   },
   {
-    title: "Twitter Feed",
-    url: createPageUrl("TwitterFeed"),
-    icon: Twitter,
-    description: "Live Legislative Updates",
+    title: "X Feed",
+    url: createPageUrl("XFeed"),
+    icon: XIcon,
+    description: "Official Bill Movement Alerts",
   },
   {
     title: "Email Lists",
@@ -175,6 +181,33 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
     enabled: isReady && !!user,
     staleTime: 60000,
     refetchInterval: 15000,
+    refetchOnWindowFocus: true,
+  });
+
+  const {
+    data: unreadNotificationCount = 0,
+    refetch: refetchNotificationCount,
+  } = useQuery({
+    queryKey: ["notificationUnreadCount", state, selectedSessionId],
+    queryFn: () =>
+      api.entities.Notification.getUnreadCount(selectedSessionId, state),
+    enabled: isReady && !!user,
+    refetchInterval: 15000,
+    staleTime: 5000,
+    refetchOnWindowFocus: true,
+  });
+
+  const { data: unreadXAlertCount = 0, refetch: refetchXAlertCount } = useQuery({
+    queryKey: ["xAlertUnreadCount", state, selectedSessionId],
+    queryFn: () =>
+      api.entities.Notification.getUnreadCount(
+        selectedSessionId,
+        state,
+        "x_early_alert",
+      ),
+    enabled: isReady && !!user,
+    refetchInterval: 15000,
+    staleTime: 5000,
     refetchOnWindowFocus: true,
   });
 
@@ -288,6 +321,14 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
                           meetingAlertCount > 0 && (
                             <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center bg-red-500 text-white text-[11px] font-bold rounded-full leading-none">
                               {meetingAlertCount > 99 ? "99+" : meetingAlertCount}
+                            </span>
+                          )}
+                        {item.title === "X Feed" &&
+                          unreadXAlertCount > 0 && (
+                            <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center bg-red-500 text-white text-[11px] font-bold rounded-full leading-none">
+                              {unreadXAlertCount > 99
+                                ? "99+"
+                                : unreadXAlertCount}
                             </span>
                           )}
                       </Link>
@@ -427,7 +468,43 @@ function AppLayout({ children, currentPageName: _currentPageName }) {
                 committees, comparison, social feeds, email lists, notifications, and alerts.
               </p>
             </div>
-            <SessionSelector compact className="w-full shrink-0 lg:w-[300px]" />
+            <div className="flex w-full shrink-0 items-center gap-2 lg:w-auto">
+              <Popover>
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label={`Open notifications${
+                      unreadNotificationCount > 0
+                        ? `, ${unreadNotificationCount} unread`
+                        : ""
+                    }`}
+                    className="relative inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-blue-200 bg-white text-slate-700 shadow-sm transition-colors hover:bg-blue-50"
+                  >
+                    <Bell className="h-5 w-5" />
+                    {unreadNotificationCount > 0 && (
+                      <span className="absolute -right-1.5 -top-1.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+                        {unreadNotificationCount > 99
+                          ? "99+"
+                          : unreadNotificationCount}
+                      </span>
+                    )}
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  align="end"
+                  className="w-[min(94vw,42rem)] border-0 p-0 shadow-xl"
+                >
+                  <NotificationCenter
+                    userId={user?.id}
+                    onChange={() => {
+                      refetchNotificationCount();
+                      refetchXAlertCount();
+                    }}
+                  />
+                </PopoverContent>
+              </Popover>
+              <SessionSelector compact className="w-full lg:w-[300px]" />
+            </div>
           </div>
         </section>
 

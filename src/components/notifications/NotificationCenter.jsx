@@ -3,19 +3,24 @@ import { api } from "@/api/apiClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import XIcon from "@/components/icons/XIcon";
 import {
   Bell,
-  Twitter,
   FileText,
   AlertCircle,
   Check,
   Trash2,
+  ExternalLink,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
 import { useLegislativeSession } from "@/lib/LegislativeSessionContext";
 
-export default function NotificationCenter({ userId, onClose: _onClose }) {
+export default function NotificationCenter({
+  userId,
+  onClose: _onClose,
+  onChange,
+}) {
   const { state, selectedSessionId, isReady } = useLegislativeSession();
   const [notifications, setNotifications] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -79,6 +84,7 @@ export default function NotificationCenter({ userId, onClose: _onClose }) {
         ),
       );
       setUnreadCount((prev) => Math.max(0, prev - 1));
+      onChange?.();
     } catch (error) {
       console.error("Error marking notification as read:", error);
     }
@@ -103,6 +109,7 @@ export default function NotificationCenter({ userId, onClose: _onClose }) {
       if (originScope !== activeScopeRef.current) return;
       setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
       setUnreadCount(0);
+      onChange?.();
     } catch (error) {
       console.error("Error marking all as read:", error);
     }
@@ -120,6 +127,7 @@ export default function NotificationCenter({ userId, onClose: _onClose }) {
       );
       if (originScope !== activeScopeRef.current) return;
       setNotifications((prev) => prev.filter((n) => n.id !== notificationId));
+      onChange?.();
     } catch (error) {
       console.error("Error deleting notification:", error);
     }
@@ -128,7 +136,8 @@ export default function NotificationCenter({ userId, onClose: _onClose }) {
   const getNotificationIcon = (type) => {
     switch (type) {
       case "tweet_alert":
-        return <Twitter className="w-5 h-5 text-blue-500" />;
+      case "x_early_alert":
+        return <XIcon className="h-5 w-5 text-slate-950" />;
       case "bill_status_change":
         return <FileText className="w-5 h-5 text-green-500" />;
       case "new_bill":
@@ -216,6 +225,12 @@ export default function NotificationCenter({ userId, onClose: _onClose }) {
                       <p className="text-sm text-slate-600 mb-2">
                         {notification.message}
                       </p>
+                      {notification.extra?.requires_official_confirmation && (
+                        <p className="mb-2 text-xs font-medium text-amber-700">
+                          Early alert — awaiting confirmation from LegiScan or
+                          official legislative records.
+                        </p>
+                      )}
                       <div className="flex items-center justify-between">
                         <span className="text-xs text-slate-500">
                           {formatDistanceToNow(
@@ -243,6 +258,23 @@ export default function NotificationCenter({ userId, onClose: _onClose }) {
                           >
                             <Trash2 className="w-3 h-3" />
                           </Button>
+                          {notification.extra?.x_post_url && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              asChild
+                              className="h-7 text-xs text-slate-700"
+                            >
+                              <a
+                                href={notification.extra.x_post_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                <ExternalLink className="mr-1 h-3 w-3" />
+                                X post
+                              </a>
+                            </Button>
+                          )}
                         </div>
                       </div>
                       {notification.sent_to_phone && (
