@@ -2,7 +2,15 @@ import React, { useState, useEffect, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
+import {
+  isRichTextHtml,
+  listToRichHtml,
+  plainTextToRichHtml,
+  RichTextContent,
+  RichTextEditor,
+  richTextHasContent,
+  sanitizeRichTextHtml,
+} from "@/components/ui/rich-text-editor";
 import {
   ArrowLeft,
   Building2,
@@ -26,48 +34,61 @@ import { fetchBillTextForAI } from "@/services/legiscan";
 
 // ── Analysis shape helpers ───────────────────────────────────────────────────
 
-const LIST_FIELDS = ["arguments_for", "arguments_against", "questions"];
-
-const toLines = (value) => {
-  if (Array.isArray(value)) return value.filter(Boolean).join("\n");
-  return String(value ?? "");
-};
-
 const fromLines = (text) =>
   String(text ?? "")
     .split("\n")
-    .map((l) => l.replace(/^\s*[-*•]\s*/, "").trim())
+    .map((line) =>
+      line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim(),
+    )
     .filter(Boolean);
 
+const normalizeProse = (value) => {
+  const text = String(value ?? "");
+  return isRichTextHtml(text)
+    ? sanitizeRichTextHtml(text)
+    : plainTextToRichHtml(text);
+};
+
+const normalizeList = (value, ordered = false) => {
+  if (Array.isArray(value)) return listToRichHtml(value, ordered);
+  const text = String(value ?? "");
+  if (isRichTextHtml(text)) return sanitizeRichTextHtml(text);
+  return listToRichHtml(fromLines(text), ordered);
+};
+
+const RICH_TEXT_FIELDS = [
+  "short_summary",
+  "arguments_for",
+  "arguments_against",
+  "questions",
+  "current_law",
+  "what_it_does",
+  "proposed_modifications",
+  "misc_notes",
+];
+
 const normalizeAnalysis = (analysis = {}) => ({
-  short_summary: analysis.short_summary ?? "",
-  arguments_for: Array.isArray(analysis.arguments_for)
-    ? analysis.arguments_for
-    : fromLines(analysis.arguments_for),
-  arguments_against: Array.isArray(analysis.arguments_against)
-    ? analysis.arguments_against
-    : fromLines(analysis.arguments_against),
-  questions: Array.isArray(analysis.questions)
-    ? analysis.questions
-    : fromLines(analysis.questions),
-  current_law: analysis.current_law ?? "",
-  what_it_does: analysis.what_it_does ?? "",
-  proposed_modifications: analysis.proposed_modifications ?? "",
-  misc_notes: analysis.misc_notes ?? "",
+  short_summary: normalizeProse(analysis.short_summary),
+  arguments_for: normalizeList(analysis.arguments_for),
+  arguments_against: normalizeList(analysis.arguments_against),
+  questions: normalizeList(analysis.questions, true),
+  current_law: normalizeProse(analysis.current_law),
+  what_it_does: normalizeProse(analysis.what_it_does),
+  proposed_modifications: normalizeProse(analysis.proposed_modifications),
+  misc_notes: normalizeProse(analysis.misc_notes),
   generated_at: analysis.generated_at ?? null,
 });
 
 const hasAnyContent = (a) =>
-  Boolean(
-    a.short_summary ||
-      a.arguments_for.length ||
-      a.arguments_against.length ||
-      a.questions.length ||
-      a.current_law ||
-      a.what_it_does ||
-      a.proposed_modifications ||
-      a.misc_notes,
-  );
+  RICH_TEXT_FIELDS.some((field) => richTextHasContent(a[field]));
+
+const sanitizeAnalysis = (analysis) => {
+  const sanitized = { ...analysis };
+  for (const field of RICH_TEXT_FIELDS) {
+    sanitized[field] = sanitizeRichTextHtml(analysis[field]);
+  }
+  return sanitized;
+};
 
 const getStatusColor = (status) => {
   const colors = {
@@ -86,31 +107,18 @@ const getStatusColor = (status) => {
   return colors[status] || colors.introduced;
 };
 
-// ── Read-only section renderers ──────────────────────────────────────────────
-
-const ProseSection = ({ text }) =>
-  text ? (
-    <p className="text-slate-700 whitespace-pre-line leading-relaxed">{text}</p>
-  ) : (
-    <p className="text-slate-400 italic text-sm">Not yet provided.</p>
-  );
-
-const BulletSection = ({ items, marker = "disc" }) =>
-  items && items.length ? (
-    <ul
-      className={`space-y-1.5 text-slate-700 ${
-        marker === "disc" ? "list-disc" : "list-decimal"
-      } pl-5`}
-    >
-      {items.map((item, i) => (
-        <li key={i} className="leading-relaxed">
-          {item}
-        </li>
-      ))}
-    </ul>
-  ) : (
-    <p className="text-slate-400 italic text-sm">Not yet provided.</p>
-  );
+// Defined outside TrackedBillDetail so typing never remounts the active editor.
+const AnalysisSection = ({ icon: Icon, iconClass, title, children }) => (
+  <Card>
+    <CardHeader className="pb-3">
+      <CardTitle className="text-lg flex items-center gap-2">
+        <Icon className={`w-5 h-5 ${iconClass}`} />
+        {title}
+      </CardTitle>
+    </CardHeader>
+    <CardContent>{children}</CardContent>
+  </Card>
+);
 
 export default function TrackedBillDetail({
   bill,
@@ -146,7 +154,11 @@ export default function TrackedBillDetail({
     setForm((prev) => ({ ...prev, [key]: value }));
 
   const persist = (next) => {
-    const payload = { ...next, generated_at: next.generated_at ?? null };
+    const payload = sanitizeAnalysis({
+      ...next,
+      generated_at: next.generated_at ?? null,
+    });
+    setForm(payload);
     onSave(payload);
   };
 
@@ -254,19 +266,6 @@ Maintain accuracy and track closely to the bill text. Be detailed but concise.`;
   };
 
   const generated = hasAnyContent(saved) || hasAnyContent(form);
-
-  // Section wrapper that swaps between read view and edit textarea(s).
-  const Section = ({ icon: Icon, iconClass, title, fieldKey, children }) => (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-lg flex items-center gap-2">
-          <Icon className={`w-5 h-5 ${iconClass}`} />
-          {title}
-        </CardTitle>
-      </CardHeader>
-      <CardContent>{children}</CardContent>
-    </Card>
-  );
 
   return (
     <div className="space-y-6">
@@ -439,153 +438,149 @@ Maintain accuracy and track closely to the bill text. Be detailed but concise.`;
       {(generated || editing) && (
         <>
           {/* Short summary */}
-          <Section
+          <AnalysisSection
             icon={Sparkles}
             iconClass="text-purple-500"
             title="Short Summary"
           >
             {editing ? (
-              <Textarea
-                className="min-h-[100px] resize-y"
+              <RichTextEditor
+                minHeight={100}
                 placeholder="A short, neutral summary of what the bill does..."
                 value={form.short_summary}
-                onChange={(e) => setField("short_summary", e.target.value)}
+                onChange={(value) => setField("short_summary", value)}
               />
             ) : (
-              <ProseSection text={saved.short_summary} />
+              <RichTextContent value={saved.short_summary} />
             )}
-          </Section>
+          </AnalysisSection>
 
           {/* Arguments for / against */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <Section
+            <AnalysisSection
               icon={ThumbsUp}
               iconClass="text-green-600"
               title="Arguments For Passage"
             >
               {editing ? (
-                <Textarea
-                  className="min-h-[140px] resize-y"
-                  placeholder="One argument per line..."
-                  value={toLines(form.arguments_for)}
-                  onChange={(e) =>
-                    setField("arguments_for", fromLines(e.target.value))
-                  }
+                <RichTextEditor
+                  minHeight={150}
+                  placeholder="Add supporting arguments, evidence, and expected benefits..."
+                  value={form.arguments_for}
+                  onChange={(value) => setField("arguments_for", value)}
                 />
               ) : (
-                <BulletSection items={saved.arguments_for} />
+                <RichTextContent value={saved.arguments_for} />
               )}
-            </Section>
+            </AnalysisSection>
 
-            <Section
+            <AnalysisSection
               icon={ThumbsDown}
               iconClass="text-red-600"
               title="Arguments Against Passage"
             >
               {editing ? (
-                <Textarea
-                  className="min-h-[140px] resize-y"
-                  placeholder="One argument per line..."
-                  value={toLines(form.arguments_against)}
-                  onChange={(e) =>
-                    setField("arguments_against", fromLines(e.target.value))
-                  }
+                <RichTextEditor
+                  minHeight={150}
+                  placeholder="Add concerns, tradeoffs, and possible unintended consequences..."
+                  value={form.arguments_against}
+                  onChange={(value) => setField("arguments_against", value)}
                 />
               ) : (
-                <BulletSection items={saved.arguments_against} />
+                <RichTextContent value={saved.arguments_against} />
               )}
-            </Section>
+            </AnalysisSection>
           </div>
 
           {/* Questions */}
-          <Section
+          <AnalysisSection
             icon={HelpCircle}
             iconClass="text-amber-600"
             title="Questions for Members to Ask"
           >
             {editing ? (
-              <Textarea
-                className="min-h-[140px] resize-y"
-                placeholder="One question per line..."
-                value={toLines(form.questions)}
-                onChange={(e) =>
-                  setField("questions", fromLines(e.target.value))
-                }
+              <RichTextEditor
+                minHeight={150}
+                placeholder="Add questions members should ask in committee..."
+                value={form.questions}
+                onChange={(value) => setField("questions", value)}
               />
             ) : (
-              <BulletSection items={saved.questions} marker="decimal" />
+              <RichTextContent value={saved.questions} />
             )}
-          </Section>
+          </AnalysisSection>
 
           {/* Current law */}
-          <Section icon={Scale} iconClass="text-slate-600" title="Current Law (OCGA)">
+          <AnalysisSection
+            icon={Scale}
+            iconClass="text-slate-600"
+            title="Current Law (OCGA)"
+          >
             {editing ? (
-              <Textarea
-                className="min-h-[120px] resize-y"
+              <RichTextEditor
+                minHeight={130}
                 placeholder="The relevant existing law this bill changes..."
                 value={form.current_law}
-                onChange={(e) => setField("current_law", e.target.value)}
+                onChange={(value) => setField("current_law", value)}
               />
             ) : (
-              <ProseSection text={saved.current_law} />
+              <RichTextContent value={saved.current_law} />
             )}
-          </Section>
+          </AnalysisSection>
 
           {/* What it does */}
-          <Section
+          <AnalysisSection
             icon={FileText}
             iconClass="text-blue-600"
             title="What Does This Bill Do?"
           >
             {editing ? (
-              <Textarea
-                className="min-h-[160px] resize-y"
+              <RichTextEditor
+                minHeight={180}
                 placeholder="A detailed breakdown of the bill's provisions..."
                 value={form.what_it_does}
-                onChange={(e) => setField("what_it_does", e.target.value)}
+                onChange={(value) => setField("what_it_does", value)}
               />
             ) : (
-              <ProseSection text={saved.what_it_does} />
+              <RichTextContent value={saved.what_it_does} />
             )}
-          </Section>
+          </AnalysisSection>
 
           {/* Proposed modifications */}
-          <Section
+          <AnalysisSection
             icon={Wrench}
             iconClass="text-orange-600"
             title="Proposed Modifications"
           >
             {editing ? (
-              <Textarea
-                className="min-h-[120px] resize-y"
+              <RichTextEditor
+                minHeight={130}
                 placeholder="Suggested changes, drafting fixes, typos..."
                 value={form.proposed_modifications}
-                onChange={(e) =>
-                  setField("proposed_modifications", e.target.value)
-                }
+                onChange={(value) => setField("proposed_modifications", value)}
               />
             ) : (
-              <ProseSection text={saved.proposed_modifications} />
+              <RichTextContent value={saved.proposed_modifications} />
             )}
-          </Section>
+          </AnalysisSection>
 
           {/* Misc notes */}
-          <Section
+          <AnalysisSection
             icon={StickyNote}
             iconClass="text-indigo-500"
             title="Miscellaneous Notes & Resources"
           >
             {editing ? (
-              <Textarea
-                className="min-h-[120px] resize-y"
+              <RichTextEditor
+                minHeight={130}
                 placeholder="Notes, caveats, links to resources..."
                 value={form.misc_notes}
-                onChange={(e) => setField("misc_notes", e.target.value)}
+                onChange={(value) => setField("misc_notes", value)}
               />
             ) : (
-              <ProseSection text={saved.misc_notes} />
+              <RichTextContent value={saved.misc_notes} />
             )}
-          </Section>
+          </AnalysisSection>
         </>
       )}
     </div>

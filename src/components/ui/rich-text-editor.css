@@ -1,0 +1,139 @@
+.rich-text-editor {
+  overflow: hidden;
+  border: 1px solid rgb(203 213 225);
+  border-radius: 0.5rem;
+  background: white;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.rich-text-editor:focus-within {
+  border-color: rgb(59 130 246);
+  box-shadow: 0 0 0 3px rgb(59 130 246 / 0.12);
+}
+
+.rich-text-editor .rich-text-editor__toolbar.ql-toolbar.ql-snow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.125rem;
+  border: 0;
+  border-bottom: 1px solid rgb(226 232 240);
+  background: rgb(248 250 252);
+  padding: 0.5rem;
+}
+
+.rich-text-editor .ql-toolbar.ql-snow .ql-formats {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 0.25rem 0 0;
+}
+
+.rich-text-editor .ql-toolbar.ql-snow button,
+.rich-text-editor .ql-toolbar.ql-snow .ql-picker-label {
+  border-radius: 0.25rem;
+}
+
+.rich-text-editor .ql-toolbar.ql-snow button:hover,
+.rich-text-editor .ql-toolbar.ql-snow button:focus,
+.rich-text-editor .ql-toolbar.ql-snow button.ql-active,
+.rich-text-editor .ql-toolbar.ql-snow .ql-picker-label:hover,
+.rich-text-editor .ql-toolbar.ql-snow .ql-picker-label.ql-active {
+  background: rgb(226 232 240);
+}
+
+.rich-text-editor .ql-toolbar.ql-snow button.ql-undo,
+.rich-text-editor .ql-toolbar.ql-snow button.ql-redo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rich-text-editor .ql-toolbar.ql-snow button.ql-undo svg,
+.rich-text-editor .ql-toolbar.ql-snow button.ql-redo svg {
+  width: 1rem;
+  height: 1rem;
+  stroke: rgb(71 85 105);
+}
+
+.rich-text-editor .ql-container.ql-snow {
+  border: 0;
+  font-family: inherit;
+  font-size: 0.9375rem;
+}
+
+.rich-text-editor .ql-editor {
+  min-height: var(--rich-editor-min-height, 120px);
+  color: rgb(51 65 85);
+  line-height: 1.65;
+  padding: 0.875rem 1rem;
+}
+
+.rich-text-editor .ql-editor.ql-blank::before {
+  color: rgb(148 163 184);
+  font-style: normal;
+  left: 1rem;
+  right: 1rem;
+}
+
+.rich-text-editor .ql-snow .ql-tooltip {
+  z-index: 20;
+}
+
+.rich-text-content {
+  color: rgb(51 65 85);
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.rich-text-content > * + * {
+  margin-top: 0.65rem;
+}
+
+.rich-text-content h1,
+.rich-text-content h2,
+.rich-text-content h3 {
+  color: rgb(15 23 42);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.rich-text-content h1 {
+  font-size: 1.5rem;
+}
+
+.rich-text-content h2 {
+  font-size: 1.25rem;
+}
+
+.rich-text-content h3 {
+  font-size: 1.1rem;
+}
+
+.rich-text-content ul,
+.rich-text-content ol {
+  padding-left: 1.5rem;
+}
+
+.rich-text-content ul {
+  list-style: disc;
+}
+
+.rich-text-content ol {
+  list-style: decimal;
+}
+
+.rich-text-content li + li {
+  margin-top: 0.3rem;
+}
+
+.rich-text-content a {
+  color: rgb(37 99 235);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.rich-text-content blockquote {
+  border-left: 3px solid rgb(203 213 225);
+  color: rgb(71 85 105);
+  padding-left: 0.875rem;
+}
