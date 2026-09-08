@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { flushSync } from "react-dom";
+import { useNavigate } from "react-router-dom";
 import {
   useQuery,
   useQueries,
@@ -20,8 +21,13 @@ import {
   upsertMeetings,
 } from "@/services/gaMeetingsCache";
 import { billKey, parseAgendaBills, prettyBill } from "@/services/meetingIntel";
+import {
+  committeeAssignments,
+  meetingWorkspaceUrl,
+} from "@/services/meetingWorkflow";
 import { useToast } from "@/components/ui/use-toast";
 import { useLegislativeSession } from "@/lib/LegislativeSessionContext";
+import { useAuth } from "@/lib/AuthContext";
 import {
   format,
   startOfMonth,
@@ -62,6 +68,7 @@ import {
   Eye,
   EyeOff,
   Video,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -158,6 +165,53 @@ const getColorClasses = (color) =>
   EVENT_COLORS.find((c) => c.value === color) ?? EVENT_COLORS[0];
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
+const CALENDAR_POSITION_STORAGE_PREFIX = "legispulse:calendar-position";
+
+const calendarPositionStorageKey = (userId, state, sessionId) =>
+  `${CALENDAR_POSITION_STORAGE_PREFIX}:${userId || "anonymous"}:${state}:${sessionId}`;
+
+const parseStoredMonth = (monthKey) => {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(monthKey || ""));
+  if (!match) return null;
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  if (!Number.isSafeInteger(year) || monthIndex < 0 || monthIndex > 11) {
+    return null;
+  }
+  return new Date(year, monthIndex, 1);
+};
+
+const readCalendarPosition = (storageKey) => {
+  if (!storageKey) return null;
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(storageKey) || "null");
+    const monthDate = parseStoredMonth(parsed?.monthKey);
+    const offset = Number(parsed?.offset);
+    if (!monthDate || !Number.isFinite(offset) || offset < 0) return null;
+    return {
+      monthKey: format(monthDate, "yyyy-MM"),
+      monthDate,
+      offset,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const writeCalendarPosition = (storageKey, position) => {
+  if (!storageKey || !parseStoredMonth(position?.monthKey)) return;
+  try {
+    sessionStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        monthKey: position.monthKey,
+        offset: Math.max(0, Number(position.offset) || 0),
+      }),
+    );
+  } catch {
+    // Session storage can be unavailable in privacy-restricted browsers.
+  }
+};
 
 // ── Helper: default new event ────────────────────────────────
 const makeDefaultEvent = (date) => {
@@ -208,7 +262,9 @@ const replaceEventsInRange = (previous, incoming, rangeStart, rangeEnd) => {
 // Main Calendar Page
 // ═══════════════════════════════════════════════════════════════
 export default function CalendarPage() {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const {
     state,
     selectedSession,
@@ -250,17 +306,69 @@ export default function CalendarPage() {
   const pageScrollRef = useRef(null);
   const stickyHeaderRef = useRef(null);
   const focusMonthDebounceRef = useRef(null);
+  const positionSaveTimerRef = useRef(null);
+  const pendingPositionRef = useRef(null);
+  const restoredPositionRef = useRef(null);
+  const [restoredPosition, setRestoredPosition] = useState(null);
+  const [calendarSessionId, setCalendarSessionId] = useState(null);
   // Track how many months MonthView is currently showing
   const [monthRange, setMonthRange] = useState({ before: 12, after: 12 });
 
+  const positionStorageKey = useMemo(
+    () =>
+      selectedSessionId
+        ? calendarPositionStorageKey(user?.id, state, selectedSessionId)
+        : null,
+    [selectedSessionId, state, user?.id],
+  );
+
+  const flushCalendarPosition = useCallback(() => {
+    if (positionSaveTimerRef.current) {
+      clearTimeout(positionSaveTimerRef.current);
+      positionSaveTimerRef.current = null;
+    }
+    const pending = pendingPositionRef.current;
+    if (!pending) return;
+    writeCalendarPosition(pending.storageKey, pending.position);
+    pendingPositionRef.current = null;
+  }, []);
+
+  const handleCalendarPositionChange = useCallback(
+    (position) => {
+      if (!positionStorageKey) return;
+      restoredPositionRef.current = {
+        ...position,
+        monthDate: parseStoredMonth(position.monthKey),
+      };
+      pendingPositionRef.current = {
+        storageKey: positionStorageKey,
+        position,
+      };
+      if (positionSaveTimerRef.current) {
+        clearTimeout(positionSaveTimerRef.current);
+      }
+      positionSaveTimerRef.current = setTimeout(flushCalendarPosition, 150);
+    },
+    [flushCalendarPosition, positionStorageKey],
+  );
+
+  const selectedSessionStartYear = Number(selectedSession?.year_start);
+  const selectedSessionEndYear =
+    Number(selectedSession?.year_end) || selectedSessionStartYear;
+
   useEffect(() => {
-    if (!selectedSession) return;
+    if (!selectedSessionId) return;
+    flushCalendarPosition();
+    const savedPosition = readCalendarPosition(positionStorageKey);
+    restoredPositionRef.current = savedPosition;
+    setRestoredPosition(savedPosition);
     const now = new Date();
-    const startYear = Number(selectedSession.year_start);
-    const endYear = Number(selectedSession.year_end) || startYear;
-    const nextDate =
-      startYear && (now.getFullYear() < startYear || now.getFullYear() > endYear)
-        ? new Date(startYear, 0, 1)
+    const nextDate = savedPosition?.monthDate
+      ? savedPosition.monthDate
+      : selectedSessionStartYear &&
+          (now.getFullYear() < selectedSessionStartYear ||
+            now.getFullYear() > selectedSessionEndYear)
+        ? new Date(selectedSessionStartYear, 0, 1)
         : now;
     setCurrentDate(nextDate);
     setFocusedMonthDate(startOfMonth(nextDate));
@@ -270,7 +378,18 @@ export default function CalendarPage() {
     setEditingEvent(null);
     setLegEventDetail(null);
     setDeleteConfirmId(null);
-  }, [selectedSessionId]);
+    setCalendarSessionId(selectedSessionId);
+  }, [
+    flushCalendarPosition,
+    positionStorageKey,
+    selectedSessionEndYear,
+    selectedSessionId,
+    selectedSessionStartYear,
+  ]);
+
+  const isCalendarSessionReady =
+    Boolean(selectedSessionId) &&
+    Number(calendarSessionId) === Number(selectedSessionId);
 
   useEffect(() => {
     if (view === "month") setFocusedMonthDate(startOfMonth(currentDate));
@@ -281,8 +400,9 @@ export default function CalendarPage() {
       if (focusMonthDebounceRef.current) {
         clearTimeout(focusMonthDebounceRef.current);
       }
+      flushCalendarPosition();
     },
-    [],
+    [flushCalendarPosition],
   );
 
   // ── Date range for queries ──────────────────────────────────
@@ -368,6 +488,7 @@ export default function CalendarPage() {
     if (!providerSessionMapping?.isSpecialSession || !selectedSpecialWindow) {
       return;
     }
+    if (restoredPositionRef.current) return;
     const sessionDate = new Date(`${selectedSpecialWindow.startDate}T12:00:00`);
     setCurrentDate(sessionDate);
     setFocusedMonthDate(startOfMonth(sessionDate));
@@ -394,7 +515,7 @@ export default function CalendarPage() {
         queryRange.end,
         state,
       ),
-    enabled: isReady,
+    enabled: isReady && isCalendarSessionReady,
     placeholderData: (previousData, previousQuery) =>
       previousQuery?.queryKey?.[1] === state &&
       Number(previousQuery?.queryKey?.[2]) === Number(selectedSessionId)
@@ -421,7 +542,7 @@ export default function CalendarPage() {
         state,
         providerSessionId,
       ),
-    enabled: isReady && hasProviderSession && sessionBoundariesReady,
+    enabled: isReady && isCalendarSessionReady && hasProviderSession,
     staleTime: 5 * 60 * 1000,
     gcTime: 60 * 60 * 1000,
     placeholderData: (previousData, previousQuery) =>
@@ -439,7 +560,7 @@ export default function CalendarPage() {
   const { data: liveMeetingSheet = [] } = useQuery({
     queryKey: meetingSheetQueryKey,
     queryFn: async () => [],
-    enabled: isReady && hasProviderSession,
+    enabled: isReady && isCalendarSessionReady && hasProviderSession,
     initialData: [],
     staleTime: Infinity,
     gcTime: 60 * 60 * 1000,
@@ -488,6 +609,7 @@ export default function CalendarPage() {
     },
     enabled:
       isReady &&
+      isCalendarSessionReady &&
       hasProviderSession &&
       sessionBoundariesReady &&
       (!providerSessionMapping?.isSpecialSession || !!selectedSpecialWindow),
@@ -497,12 +619,19 @@ export default function CalendarPage() {
 
   const scopedCachedEvents = useMemo(
     () =>
-      filterMeetingsForSession(
-        legEvents,
-        providerSessionMapping,
-        specialSessionWindows,
-      ),
-    [legEvents, providerSessionMapping, specialSessionWindows],
+      sessionBoundariesReady
+        ? filterMeetingsForSession(
+            legEvents,
+            providerSessionMapping,
+            specialSessionWindows,
+          )
+        : legEvents,
+    [
+      legEvents,
+      providerSessionMapping,
+      sessionBoundariesReady,
+      specialSessionWindows,
+    ],
   );
 
   const sessionLegEvents = useMemo(() => {
@@ -532,18 +661,37 @@ export default function CalendarPage() {
     gcTime: 24 * 60 * 60 * 1000,
   });
 
+  const { data: assignedCommittees = [] } = useQuery({
+    queryKey: ["committeeAssignments", state, selectedSessionId],
+    queryFn: () => committeeAssignments.list(selectedSessionId, state),
+    enabled: isReady,
+  });
+  const assignedCommitteeIds = useMemo(
+    () => new Set(assignedCommittees.map((item) => String(item.committee_id))),
+    [assignedCommittees],
+  );
+
   // Attach committeeId to each legislative event by parsing its subject
   const legEventsWithCommittees = useMemo(() => {
     if (!sessionLegEvents.length) return sessionLegEvents;
     if (!allCommittees.length)
-      return sessionLegEvents.map((ev) => ({ ...ev, committeeId: null }));
+      return sessionLegEvents.map((ev) => ({
+        ...ev,
+        committeeId: ev.committeeId ?? null,
+        is_assigned_committee: assignedCommitteeIds.has(String(ev.committeeId)),
+      }));
     return sessionLegEvents.map((ev) => {
       const c = matchMeetingToCommittee(ev, allCommittees);
       return c
-        ? { ...ev, committeeId: c.id, committeeName: c.name }
-        : { ...ev, committeeId: null };
+        ? {
+            ...ev,
+            committeeId: c.id,
+            committeeName: c.name,
+            is_assigned_committee: assignedCommitteeIds.has(String(c.id)),
+          }
+        : { ...ev, committeeId: null, is_assigned_committee: false };
     });
-  }, [sessionLegEvents, allCommittees]);
+  }, [sessionLegEvents, allCommittees, assignedCommitteeIds]);
 
   // Session-local bill data is used only to resolve agenda bill numbers.
   const { data: sessionBills = [] } = useQuery({
@@ -589,7 +737,8 @@ export default function CalendarPage() {
     if (agendaBillsByEventId.size === 0) return;
     queryClient.setQueryData(meetingSheetQueryKey, (previous = []) => {
       let changed = false;
-      const next = previous.map((event) => {
+      const existingEvents = Array.isArray(previous) ? previous : [];
+      const next = existingEvents.map((event) => {
         const numbers = agendaBillsByEventId.get(event.id);
         if (!numbers) return event;
         const existing = event.agenda_bill_numbers ?? [];
@@ -853,6 +1002,19 @@ export default function CalendarPage() {
   }, []);
 
   const openEditEvent = useCallback((ev) => {
+    const isCommitteeMeeting =
+      Boolean(ev.committeeId) ||
+      String(ev.classification || "").toLowerCase().includes("committee") ||
+      String(ev.title || "").toLowerCase().includes("committee");
+    if (
+      isCommitteeMeeting &&
+      (ev._source === "legis-ga" || ev._source === "openstates")
+    ) {
+      navigate(meetingWorkspaceUrl(ev, selectedSessionId, state), {
+        state: { meeting: ev },
+      });
+      return;
+    }
     // Legislative events are read-only — show detail modal instead
     if (ev._source === "legis-ga" || ev._source === "openstates") {
       setLegEventDetail(ev);
@@ -869,7 +1031,7 @@ export default function CalendarPage() {
       location: ev.location ?? "",
     });
     setModalOpen(true);
-  }, []);
+  }, [navigate, selectedSessionId, state]);
 
   const handleSave = useCallback(() => {
     if (!formData.title.trim()) {
@@ -981,7 +1143,11 @@ export default function CalendarPage() {
                   </Button>
                 </>
               )}
-              <Button variant="outline" size="sm" onClick={goToday}>
+              <Button
+                size="sm"
+                onClick={goToday}
+                className="bg-blue-600 text-white shadow-sm hover:bg-blue-700 focus-visible:ring-blue-500"
+              >
                 Today
               </Button>
               {view !== "month" && (
@@ -1193,7 +1359,17 @@ export default function CalendarPage() {
               : "flex-1 overflow-auto min-h-0 relative"
           }
         >
-          {isInitialLoad && view !== "month" ? (
+          {isCalendarSessionReady && isLoading && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="pointer-events-none absolute right-4 top-3 z-20 flex items-center gap-2 rounded-full border border-blue-100 bg-white/95 px-3 py-1.5 text-xs font-medium text-blue-700 shadow-sm backdrop-blur sm:right-6"
+            >
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Loading session events
+            </div>
+          )}
+          {!isCalendarSessionReady || (isInitialLoad && view !== "month") ? (
             <div className="flex items-center justify-center h-64">
               <div className="w-8 h-8 border-4 border-slate-200 border-t-blue-600 rounded-full animate-spin" />
             </div>
@@ -1213,6 +1389,8 @@ export default function CalendarPage() {
                 onNewEvent={openNewEvent}
                 onEditEvent={openEditEvent}
                 onRangeExpand={handleRangeExpand}
+                initialScrollPosition={restoredPosition}
+                onScrollPositionChange={handleCalendarPositionChange}
               />
             </>
           ) : view === "week" ? (
@@ -1498,6 +1676,8 @@ function MonthView({
   onNewEvent,
   onEditEvent,
   onRangeExpand,
+  initialScrollPosition,
+  onScrollPositionChange,
 }) {
   const INITIAL_BEFORE = 12;
   const INITIAL_AFTER = 12;
@@ -1534,6 +1714,7 @@ function MonthView({
   const prevCurrentDate = useRef(currentDate);
   // Guard so we ignore the programmatic scroll caused by Today/arrow nav.
   const suppressEdgeUntilRef = useRef(0);
+  const userNavigatedRef = useRef(false);
 
   // Scroll the *current* month into view on mount and when currentDate changes
   useEffect(() => {
@@ -1549,21 +1730,29 @@ function MonthView({
         const headerHeight = stickyHeaderRef?.current?.offsetHeight || 0;
         const containerRect = container.getBoundingClientRect();
         const elRect = el.getBoundingClientRect();
+        const restoredOffset =
+          !hasScrolledToCenter.current &&
+          initialScrollPosition?.monthKey === curMonthKey
+            ? initialScrollPosition.offset
+            : 0;
         const scrollTop =
-          container.scrollTop + (elRect.top - containerRect.top) - headerHeight;
+          container.scrollTop +
+          (elRect.top - containerRect.top) -
+          headerHeight +
+          restoredOffset;
         // Suppress edge-loading for ~700ms while smooth-scroll animates,
         // otherwise the animation can trip the top/bottom edge thresholds
         // and snap the user back.
         suppressEdgeUntilRef.current = performance.now() + 700;
         container.scrollTo({
           top: Math.max(0, scrollTop),
-          behavior: dateChanged ? "smooth" : "instant",
+          behavior: dateChanged ? "smooth" : "auto",
         });
         hasScrolledToCenter.current = true;
       }
       prevCurrentDate.current = currentDate;
     }
-  }, [currentDate]); // only scroll when the user actively navigates (Today/arrows)
+  }, [currentDate, initialScrollPosition, scrollRef, stickyHeaderRef]);
 
   // ── Stable visible-month tracking ───────────────────────────────
   // A binary search over month offsets runs at most once per animation frame.
@@ -1594,10 +1783,24 @@ function MonthView({
 
     const activeDate = months[activeIndex];
     const activeKey = format(activeDate, "yyyy-MM");
-    if (activeKey === visibleMonthKeyRef.current) return;
-    visibleMonthKeyRef.current = activeKey;
-    onVisibleMonthChange(format(activeDate, "MMMM yyyy"), activeDate);
-  }, [months, onVisibleMonthChange, scrollRef, stickyHeaderRef]);
+    if (userNavigatedRef.current && onScrollPositionChange) {
+      const activeElement = monthRefs.current[activeKey];
+      const offset = activeElement
+        ? Math.max(0, activationY - activeElement.getBoundingClientRect().top)
+        : 0;
+      onScrollPositionChange({ monthKey: activeKey, offset });
+    }
+    if (activeKey !== visibleMonthKeyRef.current) {
+      visibleMonthKeyRef.current = activeKey;
+      onVisibleMonthChange(format(activeDate, "MMMM yyyy"), activeDate);
+    }
+  }, [
+    months,
+    onScrollPositionChange,
+    onVisibleMonthChange,
+    scrollRef,
+    stickyHeaderRef,
+  ]);
 
   const scheduleVisibleMonthUpdate = useCallback(() => {
     if (visibleMonthFrameRef.current != null) return;
@@ -1676,8 +1879,25 @@ function MonthView({
   useEffect(() => {
     const container = scrollRef.current;
     if (!container) return;
+    const markUserNavigation = () => {
+      userNavigatedRef.current = true;
+    };
     container.addEventListener("scroll", handleScroll, { passive: true });
-    return () => container.removeEventListener("scroll", handleScroll);
+    container.addEventListener("wheel", markUserNavigation, { passive: true });
+    container.addEventListener("touchstart", markUserNavigation, {
+      passive: true,
+    });
+    container.addEventListener("pointerdown", markUserNavigation, {
+      passive: true,
+    });
+    container.addEventListener("keydown", markUserNavigation);
+    return () => {
+      container.removeEventListener("scroll", handleScroll);
+      container.removeEventListener("wheel", markUserNavigation);
+      container.removeEventListener("touchstart", markUserNavigation);
+      container.removeEventListener("pointerdown", markUserNavigation);
+      container.removeEventListener("keydown", markUserNavigation);
+    };
   }, [handleScroll, scrollRef]);
 
   // Notify parent when range expands so it can widen its data query
@@ -1762,13 +1982,16 @@ function MonthView({
                         return (
                           <button
                             key={ev.id}
-                            className={`w-full text-left text-[11px] leading-tight px-1.5 py-0.5 rounded truncate border ${cc.light} hover:brightness-95 transition-all flex items-center gap-0.5`}
+                            className={`w-full text-left text-[11px] leading-tight px-1.5 py-0.5 rounded truncate border ${cc.light} ${ev.is_assigned_committee ? "ring-2 ring-amber-400 ring-offset-1" : ""} hover:brightness-95 transition-all flex items-center gap-0.5`}
                             onClick={(e) => {
                               e.stopPropagation();
                               onEditEvent(ev);
                             }}
                           >
                             {isLeg && <Landmark className="w-3 h-3 shrink-0" />}
+                            {ev.is_assigned_committee && (
+                              <Star className="h-3 w-3 shrink-0 fill-amber-400 text-amber-500" />
+                            )}
                             {!ev.all_day && !isLeg && (
                               <span className="font-medium mr-1">
                                 {format(parseISO(ev.start_time), "h:mm")}
@@ -1879,7 +2102,7 @@ function WeekView({ currentDate, events, onNewEvent, onEditEvent }) {
                       return (
                         <button
                           key={ev.id}
-                          className={`absolute rounded px-1 text-[11px] leading-tight overflow-hidden border ${cc.light} hover:brightness-95 hover:shadow-sm z-10`}
+                          className={`absolute rounded px-1 text-[11px] leading-tight overflow-hidden border ${cc.light} ${ev.is_assigned_committee ? "ring-2 ring-amber-400" : ""} hover:brightness-95 hover:shadow-sm z-10`}
                           style={{
                             top: `${topOffset}px`,
                             height: `${heightPx}px`,
@@ -1895,6 +2118,9 @@ function WeekView({ currentDate, events, onNewEvent, onEditEvent }) {
                             {(ev._source === "legis-ga" ||
                               ev._source === "openstates") && (
                               <Landmark className="w-3 h-3 shrink-0" />
+                            )}
+                            {ev.is_assigned_committee && (
+                              <Star className="h-3 w-3 shrink-0 fill-amber-400 text-amber-500" />
                             )}
                             {ev.is_special_session && (
                               <span className="rounded bg-violet-200 px-1 text-[9px] text-violet-900">
@@ -1957,10 +2183,13 @@ function DayView({ currentDate, events, onNewEvent, onEditEvent }) {
               return (
                 <button
                   key={ev.id}
-                  className={`text-xs px-2 py-1 rounded border ${cc.light} hover:brightness-95 flex items-center gap-1`}
+                  className={`text-xs px-2 py-1 rounded border ${cc.light} ${ev.is_assigned_committee ? "ring-2 ring-amber-400" : ""} hover:brightness-95 flex items-center gap-1`}
                   onClick={() => onEditEvent(ev)}
                 >
                   {isLeg && <Landmark className="w-3 h-3 shrink-0" />}
+                  {ev.is_assigned_committee && (
+                    <Star className="h-3 w-3 shrink-0 fill-amber-400 text-amber-500" />
+                  )}
                   {ev.is_special_session && (
                     <span className="rounded bg-violet-200 px-1 text-[9px] font-semibold text-violet-900">
                       Special Session
@@ -2007,7 +2236,7 @@ function DayView({ currentDate, events, onNewEvent, onEditEvent }) {
                       return (
                         <button
                           key={ev.id}
-                          className={`absolute rounded-lg px-2 py-1 text-xs overflow-hidden border ${cc.light} hover:brightness-95 hover:shadow-sm z-10 text-left`}
+                          className={`absolute rounded-lg px-2 py-1 text-xs overflow-hidden border ${cc.light} ${ev.is_assigned_committee ? "ring-2 ring-amber-400" : ""} hover:brightness-95 hover:shadow-sm z-10 text-left`}
                           style={{
                             top: `${topOffset}px`,
                             height: `${heightPx}px`,
@@ -2023,6 +2252,9 @@ function DayView({ currentDate, events, onNewEvent, onEditEvent }) {
                             {(ev._source === "legis-ga" ||
                               ev._source === "openstates") && (
                               <Landmark className="w-3.5 h-3.5 shrink-0" />
+                            )}
+                            {ev.is_assigned_committee && (
+                              <Star className="h-3.5 w-3.5 shrink-0 fill-amber-400 text-amber-500" />
                             )}
                             {ev.is_special_session && (
                               <span className="rounded bg-violet-200 px-1 text-[9px] text-violet-900">

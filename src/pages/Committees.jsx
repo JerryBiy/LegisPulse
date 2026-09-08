@@ -1,4 +1,6 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { format, parseISO } from "date-fns";
 import {
   useMutation,
   useQueries,
@@ -10,8 +12,14 @@ import {
   fetchCommittees,
   fetchCommitteeBills,
   fetchCommitteeDetails,
+  matchMeetingToCommittee,
   resolveLegisGaSessionMapping,
 } from "@/services/legisGa";
+import { fetchCachedMeetings } from "@/services/gaMeetingsCache";
+import {
+  committeeAssignments,
+  meetingWorkspaceUrl,
+} from "@/services/meetingWorkflow";
 import { api } from "@/api/apiClient";
 import { useLegislativeSession } from "@/lib/LegislativeSessionContext";
 import {
@@ -27,6 +35,8 @@ import {
   Star,
   Phone,
   MapPin,
+  CalendarDays,
+  Clock,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -160,6 +170,7 @@ function currentCommitteeChamberCode(bill) {
 // ═══════════════════════════════════════════════════════════════
 
 export default function CommitteesPage() {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { state, selectedSession, selectedSessionId, isReady } =
     useLegislativeSession();
@@ -184,6 +195,33 @@ export default function CommitteesPage() {
   const [trackingFilter, setTrackingFilter] = useState("all"); // all | my | team | allTeams
   const [selectedTeamId, setSelectedTeamId] = useState(null);
   const [selectedBill, setSelectedBill] = useState(null);
+
+  const { data: assignedCommittees = [] } = useQuery({
+    queryKey: ["committeeAssignments", state, selectedSessionId],
+    queryFn: () => committeeAssignments.list(selectedSessionId, state),
+    enabled: isReady,
+  });
+  const assignedCommitteeIds = useMemo(
+    () => new Set(assignedCommittees.map((item) => String(item.committee_id))),
+    [assignedCommittees],
+  );
+  const selectedCommitteeAssigned = selectedCommittee
+    ? assignedCommitteeIds.has(String(selectedCommittee.id))
+    : false;
+  const assignmentMutation = useMutation({
+    mutationFn: (/** @type {boolean} */ assigned) =>
+      committeeAssignments.set(
+        selectedCommittee,
+        assigned,
+        selectedSessionId,
+        state,
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["committeeAssignments", state, selectedSessionId],
+      });
+    },
+  });
 
   // Map UI chamber ("upper"/"lower") → legis.ga.gov ChamberType enum
   const chamberCode =
@@ -318,6 +356,63 @@ export default function CommitteesPage() {
     }
     return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
   }, [derivedCommittees, hasProviderSession, liveCommittees]);
+
+  const meetingRange = useMemo(() => {
+    const years = String(
+      selectedSession?.session_name ?? selectedSession?.name ?? "",
+    ).match(/20\d{2}/g);
+    const startYear =
+      Number(selectedSession?.year_start) || Number(years?.[0]) || new Date().getFullYear();
+    const endYear =
+      Number(selectedSession?.year_end) || Number(years?.at(-1)) || startYear;
+    return {
+      start: new Date(startYear, 0, 1).toISOString(),
+      end: new Date(endYear + 1, 0, 1).toISOString(),
+    };
+  }, [selectedSession]);
+
+  const { data: sessionMeetings = [], isLoading: loadingMeetings } = useQuery({
+    queryKey: [
+      "committeeMeetings",
+      state,
+      selectedSessionId,
+      providerSessionId,
+      meetingRange.start,
+      meetingRange.end,
+    ],
+    queryFn: () =>
+      fetchCachedMeetings(
+        meetingRange.start,
+        meetingRange.end,
+        selectedSessionId,
+        state,
+        providerSessionId,
+      ),
+    enabled: isReady && hasProviderSession && Boolean(selectedCommittee),
+    staleTime: 60 * 1000,
+  });
+
+  const committeeMeetings = useMemo(() => {
+    if (!selectedCommittee) return [];
+    const selectedKey = normalizeCommitteeName(selectedCommittee.name);
+    return sessionMeetings
+      .filter((meeting) => {
+        const matched = matchMeetingToCommittee(meeting, [selectedCommittee]);
+        if (matched) return true;
+        const meetingKey = normalizeCommitteeName(
+          `${meeting.title || ""} ${meeting.description || ""}`,
+        );
+        return selectedKey && meetingKey.includes(selectedKey);
+      })
+      .map((meeting) => ({
+        ...meeting,
+        committeeId: selectedCommittee.id,
+        committeeName: selectedCommittee.name,
+      }))
+      .sort((left, right) =>
+        String(left.start_time).localeCompare(String(right.start_time)),
+      );
+  }, [selectedCommittee, sessionMeetings]);
 
   const loadingCommittees =
     loadingBills ||
@@ -827,7 +922,7 @@ export default function CommitteesPage() {
                     setSearchQuery("");
                     setTrackingFilter("all");
                   }}
-                  className="w-full flex items-center justify-between p-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 hover:border-slate-300 transition-all text-left group"
+                  className={`w-full flex items-center justify-between p-4 rounded-xl border bg-white hover:bg-slate-50 transition-all text-left group ${assignedCommitteeIds.has(String(c.id)) ? "border-amber-300 ring-1 ring-amber-200" : "border-slate-200 hover:border-slate-300"}`}
                 >
                   <div className="flex items-center gap-3 min-w-0">
                     <div
@@ -842,6 +937,11 @@ export default function CommitteesPage() {
                     <span className="font-medium text-slate-800 truncate">
                       {c.name}
                     </span>
+                    {assignedCommitteeIds.has(String(c.id)) && (
+                      <Badge className="border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-50">
+                        <Star className="mr-1 h-3 w-3 fill-amber-400" /> Assigned
+                      </Badge>
+                    )}
                   </div>
                   <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-slate-500 shrink-0" />
                 </button>
@@ -913,6 +1013,21 @@ export default function CommitteesPage() {
               </a>
             )}
           </div>
+          <Button
+            variant={selectedCommitteeAssigned ? "default" : "outline"}
+            onClick={() => assignmentMutation.mutate(!selectedCommitteeAssigned)}
+            disabled={assignmentMutation.isPending}
+            className={selectedCommitteeAssigned ? "bg-amber-500 hover:bg-amber-600" : ""}
+          >
+            {assignmentMutation.isPending ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Star
+                className={`mr-2 h-4 w-4 ${selectedCommitteeAssigned ? "fill-white" : ""}`}
+              />
+            )}
+            {selectedCommitteeAssigned ? "Assigned to me" : "Highlight my committee"}
+          </Button>
         </div>
 
         {/* Committee info card (address, phone, members) */}
@@ -922,6 +1037,64 @@ export default function CommitteesPage() {
           chamberColor={chamberColor}
           sessionOnly={selectedCommittee.source !== "legis-ga"}
         />
+
+        <Card className="mb-6 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="flex items-center gap-2 font-semibold text-slate-900">
+                <CalendarDays className="h-4 w-4 text-blue-600" /> Committee Meetings
+              </h2>
+              <p className="mt-0.5 text-xs text-slate-500">
+                Open a meeting to manage its working agenda and take bill-by-bill notes.
+              </p>
+            </div>
+            <Badge variant="secondary">{committeeMeetings.length}</Badge>
+          </div>
+          {loadingMeetings ? (
+            <div className="flex items-center gap-2 py-5 text-sm text-slate-500">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading meetings…
+            </div>
+          ) : committeeMeetings.length === 0 ? (
+            <p className="rounded-lg border border-dashed px-4 py-5 text-sm text-slate-500">
+              No meetings for this committee are currently cached for the selected session.
+              The Calendar remains the complete daily meeting view.
+            </p>
+          ) : (
+            <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+              {committeeMeetings.map((meeting) => (
+                <button
+                  key={meeting.id}
+                  type="button"
+                  onClick={() =>
+                    navigate(
+                      meetingWorkspaceUrl(meeting, selectedSessionId, state),
+                      { state: { meeting } },
+                    )
+                  }
+                  className="flex w-full items-center justify-between gap-4 rounded-lg border border-slate-200 p-3 text-left transition hover:border-blue-300 hover:bg-blue-50"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-medium text-slate-900">
+                      {meeting.title}
+                    </span>
+                    <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+                      <span className="flex items-center gap-1">
+                        <CalendarDays className="h-3.5 w-3.5" />
+                        {format(parseISO(meeting.start_time), "MMM d, yyyy")}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <Clock className="h-3.5 w-3.5" />
+                        {format(parseISO(meeting.start_time), "h:mm a")}
+                      </span>
+                      {meeting.location && <span>{meeting.location}</span>}
+                    </span>
+                  </span>
+                  <ChevronRight className="h-4 w-4 shrink-0 text-slate-400" />
+                </button>
+              ))}
+            </div>
+          )}
+        </Card>
 
         {officialCommitteeBillsError && (
           <div className="mb-6 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950">

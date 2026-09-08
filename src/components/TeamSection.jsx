@@ -27,6 +27,9 @@ import {
   CheckCircle,
   XCircle,
   Shield as ShieldIcon,
+  LayoutDashboard,
+  NotebookPen,
+  MessageSquare,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -62,6 +65,7 @@ import {
 import BillCard from "@/components/bills/BillCard";
 import BillDetailsModal from "@/components/bills/BillDetailsModal";
 import TeamChat from "@/components/TeamChat";
+import TeamNotes from "@/components/TeamNotes";
 import { useResizableHeight, ResizeHandle } from "@/hooks/use-resizable-height";
 import { supabase } from "@/lib/supabase";
 import { useLegislativeSession } from "@/lib/LegislativeSessionContext";
@@ -127,6 +131,13 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
     localStorage.setItem(`team-open-${teamId}`, String(teamOpen));
   }, [teamOpen, teamId]);
 
+  const [activeTeamTab, setActiveTeamTab] = useState(() =>
+    localStorage.getItem(`team-tab-${teamId}`) || "overview",
+  );
+  useEffect(() => {
+    localStorage.setItem(`team-tab-${teamId}`, activeTeamTab);
+  }, [activeTeamTab, teamId]);
+
   // ── Unread chat messages ─────────────────────────────────────────────────
   const chatCacheKey = ["teamChat", teamId, authUser?.id];
   const { data: cachedMessages = [] } = useQuery({
@@ -151,14 +162,14 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
     ).length;
   }, [cachedMessages, lastChatRead, authUser?.id]);
 
-  // Mark chat as read when team section is open
+  // Mark chat as read only when the user actually opens the Chat tab.
   useEffect(() => {
-    if (teamOpen && cachedMessages.length > 0) {
+    if (teamOpen && activeTeamTab === "chat" && cachedMessages.length > 0) {
       const now = new Date().toISOString();
       localStorage.setItem(`team-chat-read-${teamId}`, now);
       setLastChatRead(now);
     }
-  }, [teamOpen, cachedMessages.length, teamId]);
+  }, [activeTeamTab, teamOpen, cachedMessages.length, teamId]);
 
   // Initialize lastChatRead on first mount if not set
   useEffect(() => {
@@ -743,10 +754,60 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
 
         <CollapsibleContent>
           <CardContent className="space-y-6 pt-0">
+            <div className="flex overflow-x-auto border-b border-slate-200" role="tablist" aria-label={`${team.name} sections`}>
+              {[
+                { id: "overview", label: "Overview", icon: LayoutDashboard },
+                { id: "bills", label: "Team Bills", icon: Star },
+                { id: "notes", label: "Team Notes", icon: NotebookPen },
+                { id: "chat", label: "Chat", icon: MessageSquare },
+                { id: "members", label: "Members", icon: Users },
+              ].map(({ id, label, icon: Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTeamTab === id}
+                  onClick={() => setActiveTeamTab(id)}
+                  className={`relative flex shrink-0 items-center gap-1.5 px-4 py-3 text-sm font-medium transition-colors ${activeTeamTab === id ? "text-blue-700" : "text-slate-500 hover:text-slate-800"}`}
+                >
+                  <Icon className="h-4 w-4" />
+                  {label}
+                  {id === "chat" && unreadChatCount > 0 && (
+                    <span className="rounded-full bg-red-500 px-1.5 text-[10px] font-bold text-white">{unreadChatCount > 99 ? "99+" : unreadChatCount}</span>
+                  )}
+                  {activeTeamTab === id && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-blue-600" />}
+                </button>
+              ))}
+            </div>
+
+            {activeTeamTab === "overview" && (
+              <div className="grid gap-4 sm:grid-cols-3">
+                <button type="button" onClick={() => setActiveTeamTab("bills")} className="rounded-xl border bg-slate-50 p-5 text-left transition hover:border-blue-300 hover:bg-blue-50">
+                  <Star className="mb-3 h-5 w-5 text-amber-500" />
+                  <p className="text-2xl font-bold text-slate-900">{teamBills.length}</p>
+                  <p className="text-sm text-slate-500">Team Bills</p>
+                </button>
+                <button type="button" onClick={() => setActiveTeamTab("notes")} className="rounded-xl border bg-slate-50 p-5 text-left transition hover:border-blue-300 hover:bg-blue-50">
+                  <NotebookPen className="mb-3 h-5 w-5 text-blue-600" />
+                  <p className="font-semibold text-slate-900">Meeting notes</p>
+                  <p className="mt-1 text-sm text-slate-500">Review notes shared from committee rooms.</p>
+                </button>
+                <button type="button" onClick={() => setActiveTeamTab("members")} className="rounded-xl border bg-slate-50 p-5 text-left transition hover:border-blue-300 hover:bg-blue-50">
+                  <Users className="mb-3 h-5 w-5 text-emerald-600" />
+                  <p className="text-2xl font-bold text-slate-900">{activeMembers.length}</p>
+                  <p className="text-sm text-slate-500">Active Members</p>
+                </button>
+              </div>
+            )}
+
+            {activeTeamTab === "notes" && <TeamNotes team={team} />}
             {/* ── Team Chat ─────────────────────────────────────── */}
-            <TeamChat teamId={teamId} />
+            <div className={activeTeamTab === "chat" ? "" : "hidden"}>
+              <TeamChat teamId={teamId} />
+            </div>
 
             {/* ── Team Bills ────────────────────────────────────── */}
+            <div className={activeTeamTab === "bills" ? "" : "hidden"}>
             {billsFullscreen && (
               <div
                 className="fixed inset-0 z-50 bg-black/40"
@@ -1197,6 +1258,8 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
             </div>
 
             {/* ── Members ───────────────────────────────────────── */}
+            </div>
+            <div className={activeTeamTab === "members" ? "" : "hidden"}>
             <Collapsible open={membersOpen} onOpenChange={setMembersOpen}>
               <div className="space-y-3">
                 <CollapsibleTrigger asChild>
@@ -1399,6 +1462,7 @@ export default function TeamSection({ team, onLeave, defaultOpen = true }) {
                 </CollapsibleContent>
               </div>
             </Collapsible>
+            </div>
           </CardContent>
         </CollapsibleContent>
       </Card>
